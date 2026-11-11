@@ -218,3 +218,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+/workspaces/*
+!/workspaces/.gitkeep
+/generated_reports/*
+!/generated_reports/.gitkeep
