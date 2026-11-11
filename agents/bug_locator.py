@@ -42,7 +42,7 @@ Use only the supplied information. Do not invent file paths,
 functions, or code.
 
 ISSUE ANALYSIS:
-{issue_analysis}
+{json.dumps(issue_analysis, indent=2) if isinstance(issue_analysis, dict) else issue_analysis}
 
 REPOSITORY CODE:
 {repository_code}
@@ -68,3 +68,63 @@ REPOSITORY CODE:
         raise ValueError(
             f"Bug Locator returned invalid structured output: {exc}"
         ) from exc
+def locate_bug_for_backend(issue_analysis, repository_data, language):
+    """
+    Adapter for the main backend workflow.
+    Returns the structure expected by core.workflow.
+    """
+
+    files = repository_data.get("files", [])
+
+    repository_code = "\n\n".join(
+        f"FILE: {item['file_path']}\n{item['content']}"
+        for item in files
+    )
+
+    if not repository_code.strip():
+        raise ValueError("Repository contains no readable source code.")
+
+    prompt = f"""
+Identify the exact bug in the supplied repository.
+
+Return ONLY valid JSON:
+{{
+    "found": true,
+    "file_path": "exact relative file path",
+    "function_name": "function name",
+    "original_code": "exact existing code block",
+    "reason": "why this code causes the reported bug"
+}}
+
+If no bug can be identified, return found=false and explain why.
+
+LANGUAGE:
+{language}
+
+ISSUE ANALYSIS:
+{issue_analysis}
+
+REPOSITORY CODE:
+{repository_code}
+"""
+
+    response = generate_text(
+        prompt=prompt,
+        system_instruction=BUG_LOCATOR_PROMPT,
+        temperature=0.1,
+    )
+
+    cleaned = response.strip()
+
+    if cleaned.startswith("```"):
+        cleaned = cleaned.split("\n", 1)[1]
+        cleaned = cleaned.rsplit("```", 1)[0].strip()
+
+    data = json.loads(cleaned)
+
+    required = ["found", "file_path", "function_name", "original_code", "reason"]
+
+    if not all(field in data for field in required):
+        raise ValueError("Bug Locator returned incomplete backend data.")
+
+    return data
