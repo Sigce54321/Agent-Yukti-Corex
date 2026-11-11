@@ -1,23 +1,83 @@
 """Run task commands in managed Docker containers without building images."""
 
 import json
-from pathlib import Path
+from contextlib import ExitStack
 import subprocess
+import threading
 import uuid
 
 from . import docker_manager, security
 
 
+MAX_OUTPUT_BYTES = 1024 * 1024
+_READ_CHUNK_BYTES = 8192
+
+
+class _OutputCaptureError(subprocess.SubprocessError):
+    """Output was truncated or could not be captured reliably."""
+
+
 def _docker(arguments, timeout):
-    return subprocess.run(
-        ["docker", *arguments],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=timeout,
-        check=False,
+    """Capture at most MAX_OUTPUT_BYTES across both pipes, without disk spooling."""
+    command = ["docker", *arguments]
+    process = subprocess.Popen(
+        command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
+    buffers = [bytearray(), bytearray()]
+    lock = threading.Lock()
+    capture_failed = threading.Event()
+
+    def read_pipe(stream, index):
+        try:
+            while True:
+                chunk = stream.read(_READ_CHUNK_BYTES)
+                if not chunk:
+                    break
+                with lock:
+                    remaining = MAX_OUTPUT_BYTES - sum(map(len, buffers))
+                    buffers[index].extend(chunk[:remaining])
+                    exceeded = len(chunk) > remaining
+                if exceeded:
+                    capture_failed.set()
+                    process.kill()
+                    break
+        except OSError:
+            capture_failed.set()
+            try:
+                process.kill()
+            except OSError:
+                pass
+        finally:
+            stream.close()
+
+    readers = [
+        threading.Thread(target=read_pipe, args=(stream, index), daemon=True)
+        for index, stream in enumerate((process.stdout, process.stderr))
+    ]
+    for reader in readers:
+        reader.start()
+    expired = None
+    try:
+        process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired as error:
+        expired = error
+        process.kill()
+        process.wait()
+    finally:
+        # A killed Docker client normally closes both pipes immediately. Do
+        # not wait indefinitely if an inherited pipe unexpectedly remains open.
+        for reader in readers:
+            reader.join(timeout=1)
+    with lock:
+        stdout, stderr = (bytes(value).decode("utf-8", errors="replace") for value in buffers)
+    if expired is not None:
+        raise subprocess.TimeoutExpired(command, timeout, output=stdout, stderr=stderr)
+    if capture_failed.is_set() or any(reader.is_alive() for reader in readers):
+        raise _OutputCaptureError(
+            f"Docker output exceeded the {MAX_OUTPUT_BYTES}-byte capture limit "
+            "or could not be captured reliably; output is incomplete."
+        )
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
 
 def _output(stdout, stderr):
@@ -40,8 +100,8 @@ def run_in_container(
 
     success means Docker completed execution and reported a reliable exit code;
     callers must use exit_code to determine whether tests passed. The security
-    policy caps execution at 120 seconds. Workspace contents must not be changed
-    by other host processes during validation and execution.
+    policy caps execution at 120 seconds. Only a sanitized disposable workspace
+    copy is mounted; the original repository is never mounted or written.
     """
     result = {
         "success": False,
@@ -74,15 +134,11 @@ def run_in_container(
     if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int) or timeout_seconds <= 0:
         log("timeout_seconds must be a positive integer.")
         return result
-    if not security.validate_workspace_path(workspace_path):
-        log("Workspace must be a safe existing task directory inside project workspaces/.")
-        return result
-
     cleanup_name = None
     created = False
+    task_stack = ExitStack()
     try:
-        supplied = Path(workspace_path)
-        workspace = (supplied if supplied.is_absolute() else security.PROJECT_ROOT / supplied).resolve(strict=True)
+        workspace = task_stack.enter_context(security.sanitized_workspace(workspace_path))
         # Docker --mount uses commas as field separators even with shell=False.
         if "," in str(workspace) or not security.validate_workspace_path(str(workspace)):
             log("Workspace path cannot safely be used as a Docker bind mount.")
@@ -155,12 +211,21 @@ def run_in_container(
         log(f"Docker command timed out after {error.timeout} seconds.")
     except FileNotFoundError:
         log("Docker CLI or workspace was not found.")
-    except (OSError, subprocess.SubprocessError, ValueError, TypeError, AttributeError) as error:
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError, AttributeError, RuntimeError) as error:
         log(f"Docker execution error: {error}")
     finally:
-        if cleanup_name is not None:
-            cleaned = docker_manager.stop_and_remove_container(cleanup_name)
-            if not cleaned and created:
-                result["success"] = False
-                log("Managed container cleanup failed; manual cleanup may be required.")
+        try:
+            if cleanup_name is not None:
+                cleaned = docker_manager.stop_and_remove_container(cleanup_name)
+                if not cleaned and created:
+                    result["success"] = False
+                    log("Managed container cleanup failed; manual cleanup may be required.")
+        except (OSError, subprocess.SubprocessError, ValueError, RuntimeError) as error:
+            result["success"] = False
+            log(f"Managed container cleanup failed: {error}")
+        try:
+            task_stack.close()
+        except (OSError, ValueError, RuntimeError) as error:
+            result["success"] = False
+            log(f"Temporary task workspace cleanup failed: {error}")
     return result
