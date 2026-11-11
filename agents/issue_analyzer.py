@@ -69,3 +69,20 @@ GITHUB ISSUE:
         raise ValueError(
             f"Issue Analyzer returned invalid structured output: {exc}"
         ) from exc
+def analyze_issue_for_backend(issue, repository_summary):
+    """
+    Compatibility adapter for the main backend workflow.
+    """
+
+    issue_text = f"""
+    TITLE: {issue.get('title', '')}
+
+    DESCRIPTION: {issue.get('body', '')}
+
+    REPOSITORY SUMMARY:
+    {repository_summary}
+    """
+
+    result = analyze_issue(issue_text)
+
+    return result.model_dump()

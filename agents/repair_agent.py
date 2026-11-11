@@ -84,3 +84,79 @@ REPOSITORY CODE:
         raise ValueError(
             f"Repair Agent returned invalid structured output: {exc}"
         ) from exc
+def propose_fix_for_backend(bug_location, issue_analysis, repository_data):
+    """
+    Backend adapter that returns the exact fields
+    required by the Patch Manager.
+    """
+
+    file_path = bug_location["file_path"]
+    original_code = bug_location["original_code"]
+
+    files = repository_data.get("files", [])
+
+    target_file = next(
+        (item for item in files if item["file_path"] == file_path),
+        None
+    )
+
+    if target_file is None:
+        raise ValueError(f"Target file not found: {file_path}")
+
+    repository_code = target_file["content"]
+
+    if original_code not in repository_code:
+        raise ValueError("Original code does not match repository content.")
+
+    prompt = f"""
+Generate a minimal replacement for the identified buggy code.
+
+Return ONLY valid JSON:
+{{
+    "modified_code": "complete replacement code"
+}}
+
+Do not return a unified diff.
+Do not change the file path.
+Preserve unrelated code.
+The replacement must solve the reported issue.
+
+ISSUE ANALYSIS:
+{json.dumps(issue_analysis, indent=2)}
+
+BUG LOCATION:
+{json.dumps(bug_location, indent=2)}
+
+TARGET FILE:
+{file_path}
+
+ORIGINAL CODE:
+{original_code}
+
+FULL FILE CONTENT:
+{repository_code}
+"""
+
+    response = generate_text(
+        prompt=prompt,
+        system_instruction="You are a careful software repair engineer. Return valid JSON only.",
+        temperature=0.1,
+    )
+
+    cleaned = response.strip()
+
+    if cleaned.startswith("```"):
+        cleaned = cleaned.split("\n", 1)[1]
+        cleaned = cleaned.rsplit("```", 1)[0].strip()
+
+    data = json.loads(cleaned)
+    modified_code = data.get("modified_code")
+
+    if not isinstance(modified_code, str) or not modified_code.strip():
+        raise ValueError("Repair Agent returned an empty modification.")
+
+    return {
+        "file_path": file_path,
+        "original_code": original_code,
+        "modified_code": modified_code
+    }

@@ -936,7 +936,7 @@ def _run_workflow(task_id):
 
         issue_analysis = _call(
             "agents.issue_analyzer",
-            "analyze_issue",
+            "analyze_issue_for_backend",
             issue,
             repository_summary
         )
@@ -971,9 +971,9 @@ def _run_workflow(task_id):
 
         bug_location = _call(
             "agents.bug_locator",
-            "locate_bug",
+            "locate_bug_for_backend",
             issue_analysis,
-            repository_path,
+            _repository_summary(repository_path),
             language
         )
 
@@ -997,11 +997,11 @@ def _run_workflow(task_id):
         )
 
         proposed_fix = _call(
-            "agents.repair_agent",
-            "propose_fix",
-            bug_location,
-            issue_analysis,
-            workspace_path
+    "agents.repair_agent",
+    "propose_fix_for_backend",
+    bug_location,
+    issue_analysis,
+    _repository_summary(workspace_path)
         )
 
         proposed_fix = _validate_proposed_fix(
@@ -1026,7 +1026,7 @@ def _run_workflow(task_id):
 
         challenger_review = _call(
             "agents.fix_challenger",
-            "challenge_fix",
+            "challenge_fix_for_backend",
             issue_analysis,
             bug_location,
             proposed_fix
