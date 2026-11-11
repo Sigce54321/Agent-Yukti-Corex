@@ -222,3 +222,6 @@ __marimo__/
 !/workspaces/.gitkeep
 /generated_reports/*
 !/generated_reports/.gitkeep
+# Environment configuration
+.env.*
+!.env.example
