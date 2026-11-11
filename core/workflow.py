@@ -1,4 +1,5 @@
 
+import difflib
 import os
 import re
 import json
@@ -1014,6 +1015,8 @@ def _run_workflow(task_id):
             proposed_fix=proposed_fix
         )
 
+       
+
         # ----------------------------------------------------
         # 11. FIX CHALLENGER
         # ----------------------------------------------------
@@ -1024,6 +1027,44 @@ def _run_workflow(task_id):
             "Fix Challenger is reviewing the proposed fix."
         )
 
+        # Convert AI dictionaries into strings for Fix Challenger.
+        issue_analysis_text = json.dumps(
+            issue_analysis,
+            indent=2,
+            ensure_ascii=False
+        )
+
+        bug_location_text = json.dumps(
+            bug_location,
+            indent=2,
+            ensure_ascii=False
+        )
+
+        # Supply the original affected code.
+        repository_code = proposed_fix["original_code"]
+
+        # Generate a unified diff from original and modified code.
+        proposed_patch = "\n".join(
+            difflib.unified_diff(
+                proposed_fix["original_code"].splitlines(),
+                proposed_fix["modified_code"].splitlines(),
+                fromfile="a/{}".format(proposed_fix["file_path"]),
+                tofile="b/{}".format(proposed_fix["file_path"]),
+                lineterm=""
+            )
+        )
+
+        if not proposed_patch.strip():
+            raise WorkflowError(
+                "PATCH_INVALID",
+                "No code changes were generated.",
+                "The proposed patch is empty.",
+                "challenging_fix"
+            )
+
+        # Call Fix Challenger with its four required arguments.
+        challenger_review = _call(
+            "agents.fix_challenger",
         challenger_review = _call(
             "agents.fix_challenger",
             "challenge_fix_for_backend",
@@ -1031,41 +1072,32 @@ def _run_workflow(task_id):
             bug_location,
             proposed_fix
         )
+        )
 
+        # Convert the Pydantic model into a dictionary.
+        challenger_review = challenger_review.model_dump()
+
+        # Validate the returned review.
         challenger_review = _require_dict(
             challenger_review,
             "Fix Challenger"
         )
 
-        allowed_risks = {
-            "low",
-            "medium",
-            "high"
-        }
-
-        if (
-            challenger_review.get("approved") is not True
-            or challenger_review.get("risk_level") not in allowed_risks
-        ):
+        # Check the actual verdict returned by Fix Challenger.
+        if challenger_review.get("verdict") != "APPROVE":
             raise WorkflowError(
                 "PATCH_INVALID",
-                "Fix Challenger did not approve the proposed fix.",
-                str(challenger_review),
+                "Fix Challenger rejected the proposed fix.",
+                json.dumps(challenger_review, indent=2),
                 "challenging_fix"
             )
 
-        if challenger_review.get("risk_level") == "high":
-            raise WorkflowError(
-                "PATCH_INVALID",
-                "The proposed fix has a high risk level.",
-                challenger_review.get("summary", ""),
-                "challenging_fix"
-            )
-
+        # Store the approved review.
         _update_task(
             task_id,
             challenger_review=challenger_review
         )
+
 
         # ----------------------------------------------------
         # 12. CREATE PATCH
