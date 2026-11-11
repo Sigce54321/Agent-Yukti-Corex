@@ -84,10 +84,14 @@ REPOSITORY CODE:
         raise ValueError(
             f"Repair Agent returned invalid structured output: {exc}"
         ) from exc
+
 def propose_fix_for_backend(bug_location, issue_analysis, repository_data):
     """
-    Backend adapter that returns the exact fields
-    required by the Patch Manager.
+    Generate a complete repaired file for the backend workflow.
+
+    original_code: buggy code fragment identified by Bug Locator.
+    repository_code: complete original target file.
+    modified_code: complete repaired target file.
     """
 
     file_path = bug_location["file_path"]
@@ -109,17 +113,21 @@ def propose_fix_for_backend(bug_location, issue_analysis, repository_data):
         raise ValueError("Original code does not match repository content.")
 
     prompt = f"""
-Generate a minimal replacement for the identified buggy code.
+Repair the identified bug with the smallest safe change.
 
 Return ONLY valid JSON:
 {{
-    "modified_code": "complete replacement code"
+    "modified_code": "complete updated file content"
 }}
 
-Do not return a unified diff.
-Do not change the file path.
-Preserve unrelated code.
-The replacement must solve the reported issue.
+IMPORTANT:
+- modified_code MUST contain the ENTIRE updated file.
+- Do not return only the replacement fragment.
+- Preserve all unrelated functions, classes, imports and comments.
+- Change only what is necessary to fix the reported issue.
+- Do not return a unified diff.
+- Do not change the file path.
+- Do not claim the code has been tested.
 
 ISSUE ANALYSIS:
 {json.dumps(issue_analysis, indent=2)}
@@ -130,16 +138,19 @@ BUG LOCATION:
 TARGET FILE:
 {file_path}
 
-ORIGINAL CODE:
+ORIGINAL BUGGY CODE:
 {original_code}
 
-FULL FILE CONTENT:
+COMPLETE ORIGINAL FILE:
 {repository_code}
 """
 
     response = generate_text(
         prompt=prompt,
-        system_instruction="You are a careful software repair engineer. Return valid JSON only.",
+        system_instruction=(
+            "You are a careful software repair engineer. "
+            "Return valid JSON containing the complete repaired file."
+        ),
         temperature=0.1,
     )
 
@@ -149,7 +160,13 @@ FULL FILE CONTENT:
         cleaned = cleaned.split("\n", 1)[1]
         cleaned = cleaned.rsplit("```", 1)[0].strip()
 
-    data = json.loads(cleaned)
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Repair Agent returned invalid JSON: {exc}"
+        ) from exc
+
     modified_code = data.get("modified_code")
 
     if not isinstance(modified_code, str) or not modified_code.strip():
@@ -158,5 +175,6 @@ FULL FILE CONTENT:
     return {
         "file_path": file_path,
         "original_code": original_code,
+        "repository_code": repository_code,
         "modified_code": modified_code
     }
