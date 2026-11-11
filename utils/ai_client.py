@@ -1,160 +1,99 @@
 
+import os
+import time
+from pathlib import Path
+
+from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 
-from utils.config import get_settings
-from utils.logger import get_logger
+
+# Load environment variables from the project root
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(PROJECT_ROOT / ".env")
+
+API_KEY = os.getenv("GEMINI_API_KEY")
+MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+
+_client = None
 
 
-logger = get_logger("yukticorex.ai_client")
+class GeminiClientError(Exception):
+    """Raised when Gemini configuration or API requests fail."""
 
 
-class AIClientError(Exception):
-    """Custom exception for Gemini API errors."""
+def get_client():
+    """Create and reuse the Gemini API client."""
+    global _client
 
-    def __init__(
-        self,
-        code: str,
-        message: str,
-        details: str = ""
-    ):
-        super().__init__(message)
+    if not API_KEY:
+        raise GeminiClientError(
+            "GEMINI_API_KEY is missing from the project .env file."
+        )
 
-        self.code = code
-        self.message = message
-        self.details = details
+    if _client is None:
+        _client = genai.Client(api_key=API_KEY)
 
-    def to_error_response(
-        self,
-        task_id: str = None,
-        stage: str = None
-    ) -> dict:
-        """
-        Convert the exception into the common error format.
-        """
-
-        return {
-            "status": "failed",
-            "error": {
-                "code": self.code,
-                "message": self.message,
-                "details": self.details,
-                "stage": stage
-            },
-            "task_id": task_id
-        }
+    return _client
 
 
-def _sanitize_details(details: str, api_key: str) -> str:
-    """Prevent API keys from appearing in error details."""
-
-    if api_key:
-        details = details.replace(api_key, "[REDACTED]")
-
-    return details[:500]
-
-
-def generate_ai_response(
+def generate_text(
     prompt: str,
-    response_schema: dict = None
+    system_instruction: str | None = None,
+    temperature: float = 0.2,
 ) -> str:
-    """
-    Generate a response using the shared Gemini API client.
+    """Generate text with automatic retries for temporary API errors."""
 
-    Args:
-        prompt (str):
-            Input prompt from an AI agent.
+    if not prompt or not prompt.strip():
+        raise ValueError("Prompt cannot be empty.")
 
-        response_schema (dict | None):
-            Optional JSON response schema.
+    client = get_client()
 
-    Returns:
-        str: Gemini model response.
-
-    Raises:
-        AIClientError: If the API request fails or response is invalid.
-    """
-
-    # Validate prompt
-    if not isinstance(prompt, str) or not prompt.strip():
-        raise AIClientError(
-            code="INVALID_INPUT",
-            message="AI prompt cannot be empty.",
-            details="A non-empty prompt string is required."
-        )
-
-    # Validate response schema
-    if response_schema is not None and not isinstance(
-        response_schema, dict
-    ):
-        raise AIClientError(
-            code="INVALID_INPUT",
-            message="Invalid response schema.",
-            details="response_schema must be a dictionary or None."
-        )
-
-    settings = get_settings()
-
-    # Check API key
-    if not settings.gemini_api_key:
-        raise AIClientError(
-            code="AI_REQUEST_FAILED",
-            message="Gemini API key is not configured.",
-            details="Set GEMINI_API_KEY in the project .env file."
-        )
-
-    try:
-        # Initialize Gemini client
-        client = genai.Client(
-            api_key=settings.gemini_api_key
-        )
-
-        generation_config = None
-
-        # Enable structured JSON output when a schema is provided
-        if response_schema is not None:
-            generation_config = types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=response_schema
+    for attempt in range(3):
+        try:
+            response = client.models.generate_content(
+                model=MODEL_NAME,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=temperature,
+                    system_instruction=system_instruction,
+                ),
             )
 
-        # Send request to Gemini
-        response = client.models.generate_content(
-            model=settings.gemini_model,
-            contents=prompt,
-            config=generation_config
-        )
+            if not response.text:
+                raise GeminiClientError(
+                    "Gemini returned an empty response."
+                )
 
-        # Extract generated text
-        response_text = getattr(response, "text", None)
+            return response.text.strip()
 
-        if not isinstance(response_text, str) or not response_text.strip():
-            raise AIClientError(
-                code="AI_INVALID_RESPONSE",
-                message="Gemini returned an empty response.",
-                details="The model response did not contain usable text."
+        except GeminiClientError:
+            raise
+
+        except Exception as exc:
+            error_text = str(exc).upper()
+
+            is_temporary = any(
+                code in error_text
+                for code in [
+                    "503",
+                    "429",
+                    "UNAVAILABLE",
+                    "RESOURCE_EXHAUSTED",
+                ]
             )
 
-        logger.info("Gemini response generated successfully.")
+            if is_temporary and attempt < 2:
+                wait_seconds = 2 ** (attempt + 1)
+                print(
+                    f"Gemini temporarily unavailable. "
+                    f"Retrying in {wait_seconds} seconds..."
+                )
+                time.sleep(wait_seconds)
+                continue
 
-        return response_text.strip()
+            raise GeminiClientError(
+                f"Gemini API request failed: {exc}"
+            ) from exc
 
-    except AIClientError:
-        raise
-
-    except Exception as exc:
-        details = _sanitize_details(
-            f"{type(exc).__name__}: {exc}",
-            settings.gemini_api_key
-        )
-
-        logger.error(
-            "Gemini API request failed: %s",
-            details
-        )
-
-        raise AIClientError(
-            code="AI_REQUEST_FAILED",
-            message="Gemini API request failed.",
-            details=details
-        ) from exc
+    raise GeminiClientError("Gemini request failed after retries.")
