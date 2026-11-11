@@ -115,6 +115,15 @@ class WorkspaceIsolationTests(unittest.TestCase):
                         if arguments[:2] == ["image", "inspect"]:
                             return subprocess.CompletedProcess(arguments, 0, "[]", "")
                         if arguments[:2] == ["container", "create"]:
+                            user_args = [arg for arg in arguments if arg.startswith("--user=")]
+                            self.assertEqual(len(user_args), 1)
+                            uid, gid = map(int, user_args[0].split("=", 1)[1].split(":"))
+                            self.assertGreater(uid, 0)
+                            self.assertGreater(gid, 0)
+                            image_index = arguments.index(f"yuktic-orex-{'browser' if language in ('html', 'css') else language}:latest")
+                            self.assertLess(arguments.index(user_args[0]), image_index)
+                            for option in security.get_container_security_options()["docker_args"]:
+                                self.assertIn(option, arguments[:image_index])
                             mount = arguments[arguments.index("--mount") + 1]
                             self.assertTrue(mount.endswith(",target=/workspace"))
                             task = Path(mount[len("type=bind,source="):].split(",target=")[0])
@@ -145,3 +154,41 @@ class WorkspaceIsolationTests(unittest.TestCase):
         self.assertFalse(result["success"])
         docker.assert_not_called()
         self.assertTrue(self.source.exists())
+
+    def test_non_root_security_options_keep_restrictions_and_writable_caches(self):
+        with patch.object(security, "_container_identity", return_value=(1234, 5678)):
+            options = security.get_container_security_options()
+        args = options["docker_args"]
+        self.assertIn("--user=1234:5678", args)
+        for flag in (
+            "--network=none", "--privileged=false", "--cap-drop=ALL",
+            "--security-opt=no-new-privileges:true", "--read-only",
+            "--cpus=1", "--memory=512m", "--memory-swap=512m", "--pids-limit=128",
+            "--tmpfs=/tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777",
+            "--env=HOME=/tmp", "--env=TMPDIR=/tmp",
+            "--env=XDG_CACHE_HOME=/tmp/.cache", "--env=npm_config_cache=/tmp/npm-cache",
+            "--env=MAVEN_CONFIG=/tmp/.m2",
+        ):
+            self.assertIn(flag, args)
+        self.assertTrue(any(arg.startswith("--env=JAVA_TOOL_OPTIONS=") and "-Duser.home=/tmp" in arg for arg in args))
+        self.assertEqual(options["timeout_seconds"], 120)
+
+    def test_root_host_identity_falls_back_to_nonzero_ids(self):
+        with patch.object(security.os, "getuid", return_value=0, create=True), patch.object(security.os, "getgid", return_value=0, create=True):
+            self.assertEqual(security._container_identity(), (1000, 1000))
+
+    def test_unprivileged_host_identity_is_preserved(self):
+        with patch.object(security.os, "getuid", return_value=1234, create=True), patch.object(security.os, "getgid", return_value=5678, create=True):
+            self.assertEqual(security._container_identity(), (1234, 5678))
+
+    def test_root_host_chowns_only_the_generated_copy(self):
+        with patch.object(security.os, "getuid", return_value=0, create=True), patch.object(security.os, "getgid", return_value=0, create=True), patch.object(security.os, "chown", create=True) as chown:
+            with security.sanitized_workspace(str(self.source)) as task:
+                calls = list(chown.call_args_list)
+                self.assertTrue(calls)
+                for call in calls:
+                    path, uid, gid = call.args
+                    self.assertTrue(path == task or path.is_relative_to(task))
+                    self.assertFalse(path == self.source or path.is_relative_to(self.source))
+                    self.assertEqual((uid, gid), (1000, 1000))
+                    self.assertFalse(call.kwargs["follow_symlinks"])
