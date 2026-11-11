@@ -77,12 +77,16 @@ class BoundedOutputTests(unittest.TestCase):
 class LifecycleTests(unittest.TestCase):
     def run_mocked(self, responses, cleaned=True):
         with tempfile.TemporaryDirectory() as directory:
+            workspaces = Path(directory).resolve() / "workspaces"
+            source = workspaces / "source"
+            source.mkdir(parents=True)
             with (
-                patch.object(runner.security, "validate_workspace_path", return_value=True),
+                patch.object(runner.security, "WORKSPACES_ROOT", workspaces),
+                patch.object(runner.security, "PROJECT_ROOT", Path(directory).resolve()),
                 patch.object(runner, "_docker", side_effect=responses) as docker,
                 patch.object(runner.docker_manager, "stop_and_remove_container", return_value=cleaned) as cleanup,
             ):
-                result = runner.run_in_container(str(Path(directory)), "python", ["python", "-m", "pytest"])
+                result = runner.run_in_container(str(source), "python", ["python", "-m", "pytest"])
         return result, docker, cleanup
 
     def test_create_timeout_cleans_up_by_unique_managed_name(self):
