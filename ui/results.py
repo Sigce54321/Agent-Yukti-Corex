@@ -1,12 +1,6 @@
 
-import os
-import requests
 import streamlit as st
-
-API_BASE_URL = os.getenv(
-    "YUKTICOREX_API_URL",
-    "http://127.0.0.1:8000"
-).rstrip("/")
+from ui import backend
 
 
 def _display_code(title: str, code: str, language: str) -> None:
@@ -72,7 +66,7 @@ def _display_test_result(title: str, result: dict) -> None:
 
 def render_results(task_id: str) -> dict | None:
     """
-    Fetch and display debugging results through the backend API.
+    Fetch and display debugging results from the local workflow.
 
     Args:
         task_id: Unique debugging task ID.
@@ -89,26 +83,7 @@ def render_results(task_id: str) -> dict | None:
         return None
 
     try:
-        response = requests.get(
-            f"{API_BASE_URL}/api/results/{task_id}",
-            timeout=30
-        )
-
-        try:
-            results = response.json()
-        except ValueError:
-            st.error("Backend returned an invalid JSON response.")
-            return None
-
-        if response.status_code >= 400:
-            error = results.get("error", {})
-            message = (
-                error.get("message", "Unable to retrieve results.")
-                if isinstance(error, dict)
-                else str(error)
-            )
-            st.error(message)
-            return results
+        results = backend.get_task_results(task_id)
 
         if not isinstance(results, dict):
             st.error("Invalid results response from backend.")
@@ -216,7 +191,7 @@ def render_results(task_id: str) -> dict | None:
 
             st.write(
                 f"**Summary:** "
-                f"{challenger.get('summary', 'Not available')}"
+                f"{challenger.get('summary') or challenger.get('explanation', 'Not available')}"
             )
 
             findings = challenger.get("findings", [])
@@ -276,6 +251,6 @@ def render_results(task_id: str) -> dict | None:
 
         return results
 
-    except requests.RequestException as exc:
-        st.error(f"Could not retrieve debugging results: {exc}")
+    except backend.BackendError as exc:
+        st.error(str(exc))
         return None

@@ -1,48 +1,19 @@
 
-import os
-import requests
 import streamlit as st
 from urllib.parse import urlparse
+from ui import backend
 
 
 # --------------------------------------------------
 # BACKEND CONFIGURATION
 # --------------------------------------------------
 
-API_BASE_URL = os.getenv(
-    "YUKTICOREX_API_URL",
-    "http://127.0.0.1:8000"
-).rstrip("/")
 
 
 # --------------------------------------------------
 # ERROR HANDLING
 # --------------------------------------------------
 
-def _get_error_message(response):
-    """Extract a readable error message from backend response."""
-
-    try:
-        data = response.json()
-
-        error = data.get("error")
-
-        if isinstance(error, dict):
-            return error.get(
-                "message",
-                "Unable to start debugging."
-            )
-
-        if error:
-            return str(error)
-
-        return data.get(
-            "message",
-            response.text or "Backend request failed."
-        )
-
-    except (ValueError, AttributeError):
-        return response.text or "Backend request failed."
 
 
 # --------------------------------------------------
@@ -94,8 +65,7 @@ def show_issue_form():
     """
     Display the GitHub issue submission form.
 
-    Backend endpoint:
-        POST /api/debug
+    Calls the local workflow's asynchronous start_debugging function.
 
     Request:
         {
@@ -190,38 +160,13 @@ def show_issue_form():
         # BACKEND API REQUEST
         # --------------------------------------------------
 
-        request_data = {
-            "repo_url": repo_url,
-            "issue_number": issue_number
-        }
-
-        st.info("Sending debugging request to backend...")
+        st.info("Submitting debugging task to the local workflow...")
 
         try:
 
-            response = requests.post(
-                f"{API_BASE_URL}/api/debug",
-                json=request_data,
-                timeout=60
-            )
-
-            # Read JSON response
-            try:
-                data = response.json()
-
-            except ValueError:
-                st.error(
-                    "Backend returned an invalid JSON response."
-                )
-                return
-
-            # Check HTTP response
-            if response.status_code not in (200, 202):
-
-                st.error(
-                    _get_error_message(response)
-                )
-
+            data = backend.submit_task(st.session_state, repo_url, issue_number)
+            if data.get("error") or data.get("status") == "failed":
+                st.error(backend.error_message(data))
                 return
 
             # Validate response format
@@ -240,6 +185,17 @@ def show_issue_form():
             # --------------------------------------------------
             # SAVE TASK INFORMATION
             # --------------------------------------------------
+
+            if st.session_state.get("task_id") == task_id:
+                # Reusing a guarded submission must not rewind polled progress
+                # to the original queued response.
+                data = {**data, **{
+                    field: st.session_state.get(session_key, data.get(field))
+                    for field, session_key in (
+                        ("status", "task_status"), ("stage", "task_stage"),
+                        ("message", "task_message"),
+                    )
+                }}
 
             st.session_state["task_id"] = task_id
 
@@ -308,22 +264,8 @@ def show_issue_form():
         # CONNECTION ERROR
         # --------------------------------------------------
 
-        except requests.Timeout:
-            st.error(
-                "Backend request timed out. "
-                "Check whether the backend is running."
-            )
-
-        except requests.ConnectionError:
-            st.error(
-                "Cannot connect to the backend. "
-                f"Please check {API_BASE_URL}"
-            )
-
-        except requests.RequestException as exc:
-            st.error(
-                f"Could not submit debugging task: {exc}"
-            )
+        except backend.BackendError as exc:
+            st.error(str(exc))
 
     # --------------------------------------------------
     # EXISTING TASK INFORMATION
@@ -357,3 +299,16 @@ def show_issue_form():
                 "queued"
             )
         )
+
+    # Explicitly reset only the submission guard; navigation never resets it.
+    if st.session_state.get("debug_submissions"):
+        st.caption("Repeated submissions reuse the accepted task. Reset only when you intend to start another run.")
+        if st.button("Allow another run for this issue", key="reset_debug_submission"):
+            retry_url = repo_url.strip()
+            try:
+                retry_issue = int(issue_number_input.strip())
+            except ValueError:
+                st.warning("Enter the repository and issue number to reset.")
+            else:
+                backend.reset_submission(st.session_state, retry_url, retry_issue)
+                st.info("You can now submit a new run for this issue.")
