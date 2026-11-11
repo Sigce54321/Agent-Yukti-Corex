@@ -3,21 +3,81 @@
 import json
 from pathlib import Path
 import subprocess
+import threading
 import uuid
 
 from . import docker_manager, security
 
 
+MAX_OUTPUT_BYTES = 1024 * 1024
+_READ_CHUNK_BYTES = 8192
+
+
+class _OutputCaptureError(subprocess.SubprocessError):
+    """Output was truncated or could not be captured reliably."""
+
+
 def _docker(arguments, timeout):
-    return subprocess.run(
-        ["docker", *arguments],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=timeout,
-        check=False,
+    """Capture at most MAX_OUTPUT_BYTES across both pipes, without disk spooling."""
+    command = ["docker", *arguments]
+    process = subprocess.Popen(
+        command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
+    buffers = [bytearray(), bytearray()]
+    lock = threading.Lock()
+    capture_failed = threading.Event()
+
+    def read_pipe(stream, index):
+        try:
+            while True:
+                chunk = stream.read(_READ_CHUNK_BYTES)
+                if not chunk:
+                    break
+                with lock:
+                    remaining = MAX_OUTPUT_BYTES - sum(map(len, buffers))
+                    buffers[index].extend(chunk[:remaining])
+                    exceeded = len(chunk) > remaining
+                if exceeded:
+                    capture_failed.set()
+                    process.kill()
+                    break
+        except OSError:
+            capture_failed.set()
+            try:
+                process.kill()
+            except OSError:
+                pass
+        finally:
+            stream.close()
+
+    readers = [
+        threading.Thread(target=read_pipe, args=(stream, index), daemon=True)
+        for index, stream in enumerate((process.stdout, process.stderr))
+    ]
+    for reader in readers:
+        reader.start()
+    expired = None
+    try:
+        process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired as error:
+        expired = error
+        process.kill()
+        process.wait()
+    finally:
+        # A killed Docker client normally closes both pipes immediately. Do
+        # not wait indefinitely if an inherited pipe unexpectedly remains open.
+        for reader in readers:
+            reader.join(timeout=1)
+    with lock:
+        stdout, stderr = (bytes(value).decode("utf-8", errors="replace") for value in buffers)
+    if expired is not None:
+        raise subprocess.TimeoutExpired(command, timeout, output=stdout, stderr=stderr)
+    if capture_failed.is_set() or any(reader.is_alive() for reader in readers):
+        raise _OutputCaptureError(
+            f"Docker output exceeded the {MAX_OUTPUT_BYTES}-byte capture limit "
+            "or could not be captured reliably; output is incomplete."
+        )
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
 
 def _output(stdout, stderr):
