@@ -1,17 +1,20 @@
+
 from unittest.mock import patch
+
 from agents.fix_challenger import challenge_fix
 
 
 @patch("agents.fix_challenger.generate_text")
 def test_challenge_fix_returns_result(mock_generate_text):
     mock_generate_text.return_value = """
-    {
-        "approved": true,
-        "reason": "The patch handles division by zero.",
-        "issues": [],
-        "suggestions": []
-    }
-    """
+{
+    "verdict": "APPROVE",
+    "findings": [],
+    "potential_regressions": [],
+    "required_corrections": [],
+    "explanation": "The patch handles division by zero."
+}
+"""
 
     result = challenge_fix(
         issue_analysis="Division by zero crashes the calculator.",
@@ -27,5 +30,10 @@ def test_challenge_fix_returns_result(mock_generate_text):
      return a / b"""
     )
 
-    assert result is not None
+    assert result.verdict == "APPROVE"
+    assert result.findings == []
+    assert result.potential_regressions == []
+    assert result.required_corrections == []
+    assert result.explanation == "The patch handles division by zero."
+
     mock_generate_text.assert_called_once()
