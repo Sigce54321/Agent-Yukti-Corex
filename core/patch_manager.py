@@ -4,6 +4,7 @@ import subprocess
 import tempfile
 
 from pathlib import Path, PureWindowsPath
+MAX_REPAIR_RETRIES = 2
 
 
 def _error(code, message, details, file_path=None):
