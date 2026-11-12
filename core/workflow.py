@@ -991,10 +991,22 @@ def _run_workflow(task_id):
                 "baseline_testing"
             )
 
+      
         _update_task(
             task_id,
             baseline_result=baseline_result
         )
+
+        # Stop if the original bug was not reproduced.
+        if baseline_result["test_status"] == "passed":
+            raise WorkflowError(
+                "BASELINE_TEST_FAILED",
+                "Baseline tests passed. The reported bug was not reproduced. "
+                "Repair workflow stopped.",
+                baseline_result.get("logs", ""),
+                "baseline_testing"
+            )
+
 
         # ----------------------------------------------------
         # 7. PREPARE REPOSITORY SUMMARY
