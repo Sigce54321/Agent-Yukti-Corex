@@ -9,7 +9,7 @@ def _decision_summary(results):
     regression = (results.get("verification") or {}).get("regression") or {}
     counts = patch_counts(results.get("diff"))
     changes = f"+{counts[0]} / -{counts[1]}" if counts is not None else "Unavailable"
-    st.markdown('<div class="decision-summary">' + row("Patch status", results.get("status", "No patch").replace("_", " ").title()) + row("Net change", changes) + row("Test result", regression.get("test_status", "Not run")) + row("Challenger", challenger.get("verdict", "Pending")) + '</div>', unsafe_allow_html=True)
+    st.markdown('<div class="decision-summary" style="display:grid !important;grid-template-columns:repeat(2,minmax(0,1fr)) !important;gap:14px !important;">' + row("Patch status", results.get("status", "No patch").replace("_", " ").title()) + row("Net change", changes) + row("Test result", regression.get("test_status", "Not run")) + row("Challenger", challenger.get("verdict", "Pending")) + '</div>', unsafe_allow_html=True)
 
 
 def show_approval(task_id: str | None = None, *, compact: bool = False) -> dict | None:

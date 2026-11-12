@@ -270,55 +270,52 @@ def render_results(task_id: str) -> dict | None:
 def render_evidence_grid(results):
     """Compact live-evidence columns matching the supplied repair workspace."""
     from ui.visuals import title, row, text, badge, status_tone, patch_counts
-    location, patch, review = st.columns([1.02, 1.6, 1.16], gap="small")
-    with location:
-        with st.container(border=True, key="location_panel"):
-            st.markdown(title("Bug Location & Result", "bug"), unsafe_allow_html=True)
-            st.markdown(row("File", results.get("bug_file")) + row("Function", results.get("bug_location")) + row("Language", results.get("language")), unsafe_allow_html=True)
-            reason = results.get("bug_explanation")
-            st.markdown('<div class="result-callout"><b>◎ Analysis result</b><p>' + text(reason, "Bug location and explanation will appear after workflow analysis.") + '</p></div>', unsafe_allow_html=True)
-    with patch:
-        with st.container(border=True, key="patch_panel"):
-            st.markdown(title("Patch Diff Preview", "code"), unsafe_allow_html=True)
-            counts = patch_counts(results.get("diff"))
-            st.markdown('<div class="patch-file">' + text(results.get("bug_file"), "Awaiting proposed patch") + (f'<span class="diff-count">+{counts[0]} −{counts[1]}</span>' if counts else '') + '</div>', unsafe_allow_html=True)
-            if results.get("diff"):
-                st.code(results["diff"], language="diff")
-            else:
-                st.markdown('<div class="empty-diff"><span>− original lines</span><span>+ proposed changes</span><p>No patch returned yet.</p></div>', unsafe_allow_html=True)
-            with st.expander("Original / modified code"):
-                language = results.get("language") or "text"
-                _display_code("Original Code", results.get("original_code", ""), language)
-                _display_code("Modified Code", results.get("modified_code", ""), language)
-    with review:
-        with st.container(border=True, key="challenger_panel"):
-            st.markdown(title("Fix Challenger Review", "shield"), unsafe_allow_html=True)
-            challenger = results.get("challenger_review") or {}
-            if isinstance(challenger, dict) and challenger:
-                st.markdown(badge(challenger.get("verdict", "Unavailable"), status_tone(challenger.get("verdict"))), unsafe_allow_html=True)
-                st.write(challenger.get("explanation") or "Explanation unavailable.")
-                with st.expander("Findings & corrections"):
-                    for field, label in (("findings", "Findings"), ("potential_regressions", "Potential Regressions"), ("required_corrections", "Required Corrections")):
-                        st.write(f"**{label}:**")
-                        entries = challenger.get(field) or []
-                        if isinstance(entries, str):
-                            entries = [entries]
-                        if isinstance(entries, (list, tuple)) and entries:
-                            for entry in entries:
-                                st.write(f"- {entry}")
-                        else:
-                            st.caption(f"No {label.lower()} reported.")
-            else:
-                st.markdown(badge("Awaiting review"), unsafe_allow_html=True)
-                st.caption("Independent Challenger reasoning will appear here. No verdict available yet.")
-        with st.container(border=True, key="verification_panel"):
-            st.markdown(title("Regression Verification", "flask"), unsafe_allow_html=True)
-            verification = results.get("verification") or {}
-            for field, label in (("baseline", "Baseline tests"), ("regression", "Regression tests")):
-                evidence = verification.get(field) or {}
-                state = evidence.get("test_status", "not_run")
-                st.markdown('<div class="test-row"><span>' + label + '</span>' + badge(state.replace("_", " "), status_tone(state)) + '</div>', unsafe_allow_html=True)
-                if evidence:
-                    with st.expander(label + " evidence"):
-                        _display_test_result(label, evidence)
-            st.caption("Docker execution evidence; test counts are shown only when supplied by the backend.")
+    # Location has its own row; only patch and review share horizontal space.
+    with st.container(border=True, key="location_panel"):
+        st.markdown(title("Bug Location & Result", "bug"), unsafe_allow_html=True)
+        st.markdown(row("File", results.get("bug_file")) + row("Function", results.get("bug_location")) + row("Language", results.get("language")), unsafe_allow_html=True)
+        reason = results.get("bug_explanation")
+        st.markdown('<div class="result-callout"><b>◎ Analysis result</b><p>' + text(reason, "Bug location and explanation will appear after workflow analysis.") + '</p></div>', unsafe_allow_html=True)
+    with st.container(border=True, key="patch_panel"):
+        st.markdown(title("Patch Diff Preview", "code"), unsafe_allow_html=True)
+        counts = patch_counts(results.get("diff"))
+        st.markdown('<div class="patch-file">' + text(results.get("bug_file"), "Awaiting proposed patch") + (f'<span class="diff-count">+{counts[0]} −{counts[1]}</span>' if counts else '') + '</div>', unsafe_allow_html=True)
+        if results.get("diff"):
+            st.code(results["diff"], language="diff")
+        else:
+            st.markdown('<div class="empty-diff"><span>− original lines</span><span>+ proposed changes</span><p>No patch returned yet.</p></div>', unsafe_allow_html=True)
+        with st.expander("Original / modified code"):
+            language = results.get("language") or "text"
+            _display_code("Original Code", results.get("original_code", ""), language)
+            _display_code("Modified Code", results.get("modified_code", ""), language)
+    with st.container(border=True, key="challenger_panel"):
+        st.markdown(title("Fix Challenger Review", "shield"), unsafe_allow_html=True)
+        challenger = results.get("challenger_review") or {}
+        if isinstance(challenger, dict) and challenger:
+            st.markdown(badge(challenger.get("verdict", "Unavailable"), status_tone(challenger.get("verdict"))), unsafe_allow_html=True)
+            st.write(challenger.get("explanation") or "Explanation unavailable.")
+            with st.expander("Findings & corrections"):
+                for field, label in (("findings", "Findings"), ("potential_regressions", "Potential Regressions"), ("required_corrections", "Required Corrections")):
+                    st.write(f"**{label}:**")
+                    entries = challenger.get(field) or []
+                    if isinstance(entries, str):
+                        entries = [entries]
+                    if isinstance(entries, (list, tuple)) and entries:
+                        for entry in entries:
+                            st.write(f"- {entry}")
+                    else:
+                        st.caption(f"No {label.lower()} reported.")
+        else:
+            st.markdown(badge("Awaiting review"), unsafe_allow_html=True)
+            st.caption("Independent Challenger reasoning will appear here. No verdict available yet.")
+    with st.container(border=True, key="verification_panel"):
+        st.markdown(title("Regression Verification", "flask"), unsafe_allow_html=True)
+        verification = results.get("verification") or {}
+        for field, label in (("baseline", "Baseline tests"), ("regression", "Regression tests")):
+            evidence = verification.get(field) or {}
+            state = evidence.get("test_status", "not_run")
+            st.markdown('<div class="test-row"><span>' + label + '</span>' + badge(state.replace("_", " "), status_tone(state)) + '</div>', unsafe_allow_html=True)
+            if evidence:
+                with st.expander(label + " evidence"):
+                    _display_test_result(label, evidence)
+        st.caption("Docker execution evidence; test counts are shown only when supplied by the backend.")

@@ -89,7 +89,9 @@ def render_dashboard():
     display_metrics(results)
     if page == "Dashboard":
         with st.container(key="dashboard_grid"):
-            left, center, right = st.columns([1.05, 2.7, 1.35], gap="medium")
+            # Use the same native two-column arrangement on laptop and desktop.
+            # Approval is a separate row, never a hidden duplicate widget tree.
+            left, center = st.columns([1.15, 1.85], gap="large")
         with left:
             with st.container(border=True, key="repository_panel"):
                 show_issue_form(compact=True)
@@ -100,15 +102,17 @@ def render_dashboard():
                 render_agents(st.session_state.get("task_stage") if task else None, st.session_state.get("task_status"))
             with st.container(border=True, key="timeline_panel"):
                 display_workflow()
-            with st.container(key="evidence_grid"):
-                render_evidence_grid(results)
-            st.button("Refresh workspace", key="refresh_workspace", use_container_width=True)
-        with right:
-            with st.container(border=True, key="decision_panel"):
-                show_approval(task, compact=True)
-            with st.container(border=True, key="passport_panel"):
-                st.markdown(title("Fix Passport", "shield"), unsafe_allow_html=True)
-                st.caption("Preview and download unavailable: the current results interface does not expose the generated report.")
+
+        # Evidence spans the full workspace width.
+        with st.container(key="evidence_grid"):
+            render_evidence_grid(results)
+
+        st.button("Refresh workspace", key="refresh_workspace", use_container_width=True)
+        with st.container(border=True, key="decision_panel"):
+            show_approval(task, compact=True)
+        with st.container(border=True, key="passport_panel"):
+            st.markdown(title("Fix Passport", "shield"), unsafe_allow_html=True)
+            st.caption("Preview and download unavailable: the current results interface does not expose the generated report.")
     elif page == "Report Issue":
         with st.container(border=True):
             show_issue_form()
