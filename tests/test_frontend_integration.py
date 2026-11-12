@@ -263,7 +263,7 @@ class FrontendRenderingTests(_FrontendCase):
             "task_id": "task-123456789abc", "status": "approved", "language": "python",
             "original_code": "before", "modified_code": "after", "diff": "-before\n+after",
             "bug_file": "main.py", "bug_location": "main", "bug_explanation": "Off by one",
-            "challenger_review": {"approved": True, "risk_level": "low", "explanation": "Review explanation"},
+            "challenger_review": {"verdict": "APPROVE", "explanation": "Review explanation"},
             "verification": {"baseline": {"test_status": "failed", "passed": False, "exit_code": 1, "logs": "baseline"}, "regression": {"test_status": "passed", "passed": True, "exit_code": 0, "logs": "regression"}},
             "pull_request_url": "https://github.com/example/project/pull/1",
         }
@@ -272,8 +272,56 @@ class FrontendRenderingTests(_FrontendCase):
         self.st.code.assert_any_call("before", language="python")
         self.st.code.assert_any_call("after", language="python")
         self.st.code.assert_any_call("-before\n+after", language="diff")
-        self.st.write.assert_any_call("**Summary:** Review explanation")
+        self.st.write.assert_any_call("**Explanation:** Review explanation")
         self.st.markdown.assert_any_call("[Open Pull Request](https://github.com/example/project/pull/1)")
+
+    def test_both_challenger_panels_render_actual_backend_fields(self):
+        for panel in ("results", "approval"):
+            for verdict in ("APPROVE", "REJECT", "NEEDS_REVISION"):
+                with self.subTest(panel=panel, verdict=verdict):
+                    self.st.write.reset_mock()
+                    self.workflow.get_task_results.return_value = {
+                        "task_id": "task-123456789abc", "status": "awaiting_approval",
+                        "challenger_review": {
+                            "verdict": verdict, "explanation": "Review reasoning",
+                            "findings": ["Finding one", "Finding two"],
+                            "potential_regressions": ["Boundary case risk"],
+                            "required_corrections": ["Add boundary check"],
+                        },
+                    }
+                    render = self.modules[panel].render_results if panel == "results" else self.modules[panel].show_approval
+                    result = render("task-123456789abc")
+                    self.assertEqual(result["status"], "awaiting_approval")
+                    if panel == "results":
+                        self.st.write.assert_any_call(f"**Verdict:** {verdict}")
+                        self.st.write.assert_any_call("**Explanation:** Review reasoning")
+                    else:
+                        self.st.write.assert_any_call("**Verdict:**", verdict)
+                        self.st.write.assert_any_call("**Explanation:**", "Review reasoning")
+                    for title in ("Findings", "Potential Regressions", "Required Corrections"):
+                        self.st.write.assert_any_call(f"**{title}:**")
+                    for entry in ("Finding one", "Finding two", "Boundary case risk", "Add boundary check"):
+                        self.st.write.assert_any_call(f"- {entry}")
+                    displayed = str(self.st.write.call_args_list)
+                    self.assertNotIn("Risk Level", displayed)
+                    self.assertNotIn("Challenger Approved", displayed)
+                    self.assertNotIn("Approved by Challenger", displayed)
+                    self.assertEqual(len(self.executor.calls), 0)
+
+    def test_challenger_empty_optional_fields_and_absent_review_are_safe(self):
+        for panel in ("results", "approval"):
+            for review in (None, {}, {"verdict": "APPROVE", "findings": [], "potential_regressions": None, "required_corrections": []}):
+                with self.subTest(panel=panel, review=review):
+                    self.st.caption.reset_mock()
+                    self.workflow.get_task_results.return_value = {"status": "awaiting_approval", "challenger_review": review}
+                    render = self.modules[panel].render_results if panel == "results" else self.modules[panel].show_approval
+                    render("task-123456789abc")
+                    if review:
+                        for field in ("findings", "potential regressions", "required corrections"):
+                            self.st.caption.assert_any_call(f"No {field} reported.")
+                    else:
+                        self.st.caption.assert_any_call("Challenger review is not available.")
+                    self.assertEqual(len(self.executor.calls), 0)
 
     def test_all_navigation_pages_render_without_http_or_side_effects(self):
         for page in ("Dashboard", "Report Issue", "Progress", "Results", "Approval"):

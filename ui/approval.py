@@ -150,26 +150,29 @@ def show_approval(task_id: str | None = None) -> dict | None:
     if isinstance(challenger, dict) and challenger:
 
         st.write(
-            "**Challenger Approved:**",
-            challenger.get("approved")
+            "**Verdict:**",
+            challenger.get("verdict") or "Not available"
         )
 
         st.write(
-            "**Risk Level:**",
-            challenger.get("risk_level", "Not available")
+            "**Explanation:**",
+            challenger.get("explanation") or "Not available"
         )
 
-        st.write(
-            "**Summary:**",
-            challenger.get("summary") or challenger.get("explanation", "Not available")
-        )
-
-        findings = challenger.get("findings", [])
-
-        if findings:
-            st.write("**Findings:**")
-            for finding in findings:
-                st.write(f"- {finding}")
+        for field, title in (
+            ("findings", "Findings"),
+            ("potential_regressions", "Potential Regressions"),
+            ("required_corrections", "Required Corrections"),
+        ):
+            entries = challenger.get(field) or []
+            if isinstance(entries, str):
+                entries = [entries]
+            st.write(f"**{title}:**")
+            if isinstance(entries, (list, tuple)) and entries:
+                for entry in entries:
+                    st.write(f"- {entry}")
+            else:
+                st.caption(f"No {title.lower()} reported.")
 
     else:
         st.caption("Challenger review is not available.")

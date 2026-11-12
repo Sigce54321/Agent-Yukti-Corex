@@ -180,29 +180,29 @@ def render_results(task_id: str) -> dict | None:
         if isinstance(challenger, dict) and challenger:
 
             st.write(
-                f"**Approved by Challenger:** "
-                f"{challenger.get('approved')}"
+                f"**Verdict:** "
+                f"{challenger.get('verdict') or 'Not available'}"
             )
 
             st.write(
-                f"**Risk Level:** "
-                f"{challenger.get('risk_level', 'Not available')}"
+                f"**Explanation:** "
+                f"{challenger.get('explanation') or 'Not available'}"
             )
 
-            st.write(
-                f"**Summary:** "
-                f"{challenger.get('summary') or challenger.get('explanation', 'Not available')}"
-            )
-
-            findings = challenger.get("findings", [])
-
-            if findings:
-                st.write("**Findings:**")
-
-                for finding in findings:
-                    st.write(f"- {finding}")
-            else:
-                st.write("No findings reported.")
+            for field, title in (
+                ("findings", "Findings"),
+                ("potential_regressions", "Potential Regressions"),
+                ("required_corrections", "Required Corrections"),
+            ):
+                entries = challenger.get(field) or []
+                if isinstance(entries, str):
+                    entries = [entries]
+                st.write(f"**{title}:**")
+                if isinstance(entries, (list, tuple)) and entries:
+                    for entry in entries:
+                        st.write(f"- {entry}")
+                else:
+                    st.caption(f"No {title.lower()} reported.")
 
         else:
             st.caption("Challenger review is not available.")
