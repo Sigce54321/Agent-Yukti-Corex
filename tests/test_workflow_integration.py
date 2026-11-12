@@ -399,3 +399,82 @@ def test_workflow_stops_when_challenger_rejects_fix(
     # A rejected patch must never be applied.
     assert state["patch_calls"] == 0
     assert state["regression_calls"] == 0
+
+def test_workflow_stops_when_baseline_tests_pass(
+    monkeypatch,
+    tmp_path
+):
+    task_id, state = prepare_workflow(
+        monkeypatch,
+        tmp_path,
+        regression_outcomes=["passed"]
+    )
+
+    # Simulate baseline tests passing.
+    def fake_call(module_name, function_name, *args, **kwargs):
+        if module_name == "github.issue_reader":
+            return {
+                "success": True,
+                "number": 1,
+                "title": "Handle division by zero",
+                "body": "The divide function should handle zero."
+            }
+
+        if (
+            module_name == "github.repo_manager"
+            and function_name == "clone_repository"
+        ):
+            return {
+                "success": True,
+                "repository_path": str(tmp_path / "repository"),
+                "default_branch": "main",
+                "commit_sha": "original-commit"
+            }
+
+        if (
+            module_name == "github.repo_manager"
+            and function_name == "create_working_copy"
+        ):
+            return {
+                "success": True,
+                "workspace_path": str(tmp_path / "workspace")
+            }
+
+        if module_name == "languages.language_detector":
+            return "python"
+
+        if module_name == "sandbox.docker_manager":
+            return True
+
+        if module_name == "verification.baseline":
+            return {
+                "test_status": "passed",
+                "passed": True,
+                "logs": "All baseline tests passed."
+            }
+
+        raise AssertionError(
+            "Workflow continued unexpectedly: {}.{}".format(
+                module_name,
+                function_name
+            )
+        )
+
+    monkeypatch.setattr(workflow, "_call", fake_call)
+
+    workflow._run_workflow(task_id)
+
+    task = workflow._load_task(task_id)
+
+    assert task["status"] == "failed"
+    assert task["error"]["code"] == "BASELINE_TEST_FAILED"
+    assert task["stage"] == "baseline_testing"
+
+    assert task["baseline_result"]["test_status"] == "passed"
+
+    # No AI agent or patch operation should execute.
+    assert state["repair_calls"] == 0
+    assert state["challenge_calls"] == 0
+    assert state["patch_calls"] == 0
+    assert state["regression_calls"] == 0
+

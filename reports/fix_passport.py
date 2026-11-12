@@ -8,19 +8,16 @@ import html
 from pathlib import Path
 from datetime import datetime, timezone
 
-# ReportLab may be unavailable in some editor environments; suppress
-# unresolved-source diagnostics without changing runtime behavior.
-from reportlab.lib import colors  # type: ignore[reportMissingModuleSource]
-from reportlab.lib.pagesizes import A4  # type: ignore[reportMissingModuleSource]
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle  # type: ignore[reportMissingModuleSource]
-from reportlab.lib.units import mm  # type: ignore[reportMissingModuleSource]
-from reportlab.platypus import (  # type: ignore[reportMissingModuleSource]
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import mm
+from reportlab.platypus import (
     SimpleDocTemplate,
     Paragraph,
     Spacer,
     Table,
-    TableStyle,
-    PageBreak
+    TableStyle
 )
 
 
@@ -60,8 +57,10 @@ def _to_dict(value):
     if isinstance(value, str):
         try:
             parsed = json.loads(value)
+
             if isinstance(parsed, dict):
                 return parsed
+
         except (ValueError, TypeError):
             return {"details": value}
 
@@ -123,10 +122,10 @@ def _create_styles():
 
     styles.add(
         ParagraphStyle(
-          name="PassportSubtitle",
-parent=styles["Normal"],
-fontSize=10,
-alignment=1,
+            name="PassportSubtitle",
+            parent=styles["Normal"],
+            fontSize=10,
+            alignment=1,
             textColor=colors.HexColor("#64748B"),
             spaceAfter=20
         )
@@ -244,17 +243,26 @@ def _add_table(story, rows, styles):
 
     table.setStyle(
         TableStyle([
-            ("BACKGROUND", (0, 0), (0, -1),
-             colors.HexColor("#EAF1F8")),
-
-            ("TEXTCOLOR", (0, 0), (-1, -1),
-             colors.HexColor("#1E293B")),
-
-            ("GRID", (0, 0), (-1, -1), 0.4,
-             colors.HexColor("#CBD5E1")),
-
+            (
+                "BACKGROUND",
+                (0, 0),
+                (0, -1),
+                colors.HexColor("#EAF1F8")
+            ),
+            (
+                "TEXTCOLOR",
+                (0, 0),
+                (-1, -1),
+                colors.HexColor("#1E293B")
+            ),
+            (
+                "GRID",
+                (0, 0),
+                (-1, -1),
+                0.4,
+                colors.HexColor("#CBD5E1")
+            ),
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
-
             ("LEFTPADDING", (0, 0), (-1, -1), 8),
             ("RIGHTPADDING", (0, 0), (-1, -1), 8),
             ("TOPPADDING", (0, 0), (-1, -1), 7),
@@ -305,7 +313,7 @@ def generate_fix_passport(
     challenger_review
 ):
     """
-    Generate a PDF Fix Passport for a completed repair workflow.
+    Generate a PDF Fix Passport.
 
     Returns:
         {
@@ -317,14 +325,45 @@ def generate_fix_passport(
 
     try:
 
-        # Normalize incoming data
+        # ------------------------------------------------
+        # NORMALIZE INCOMING DATA
+        # ------------------------------------------------
+
         issue = _to_dict(issue)
         bug_location = _to_dict(bug_location)
         proposed_fix = _to_dict(proposed_fix)
         verification = _to_dict(verification)
         challenger_review = _to_dict(challenger_review)
 
-        # Create output directory
+        # ------------------------------------------------
+        # VALIDATE VERIFICATION
+        # ------------------------------------------------
+
+        verification_passed = (
+            verification.get("passed") is True
+            or verification.get("test_status") == "passed"
+        )
+
+        if not verification_passed:
+            raise ValueError(
+                "Cannot generate Fix Passport: "
+                "regression verification did not pass."
+            )
+
+        # ------------------------------------------------
+        # VALIDATE FIX CHALLENGER
+        # ------------------------------------------------
+
+        if challenger_review.get("verdict") != "APPROVE":
+            raise ValueError(
+                "Cannot generate Fix Passport: "
+                "Fix Challenger did not approve the repair."
+            )
+
+        # ------------------------------------------------
+        # CREATE OUTPUT DIRECTORY
+        # ------------------------------------------------
+
         REPORTS_DIR.mkdir(
             parents=True,
             exist_ok=True
@@ -333,7 +372,10 @@ def generate_fix_passport(
         filename = _safe_filename(task_id)
         report_path = REPORTS_DIR / filename
 
-        # Prepare document
+        # ------------------------------------------------
+        # PREPARE DOCUMENT
+        # ------------------------------------------------
+
         document = SimpleDocTemplate(
             str(report_path),
             pagesize=A4,
@@ -373,13 +415,16 @@ def generate_fix_passport(
             [
                 ["Task ID", str(task_id)],
                 ["Generated On", generated_at],
-                ["Repair Status", "Completed - Awaiting Human Approval"]
+                [
+                    "Repair Status",
+                    "Verified - Awaiting Human Approval"
+                ]
             ],
             styles
         )
 
         # ------------------------------------------------
-        # ISSUE DETAILS
+        # 1. ISSUE DETAILS
         # ------------------------------------------------
 
         _add_heading(
@@ -401,17 +446,18 @@ def generate_fix_passport(
                 ],
                 [
                     "Issue URL",
-                    _get_text(issue, "issue_url", "html_url", "url")
+                    _get_text(
+                        issue,
+                        "issue_url",
+                        "html_url",
+                        "url"
+                    )
                 ]
             ],
             styles
         )
 
-        _add_text(
-            story,
-            "Issue Description:",
-            styles
-        )
+        _add_text(story, "Issue Description:", styles)
 
         _add_text(
             story,
@@ -420,7 +466,7 @@ def generate_fix_passport(
         )
 
         # ------------------------------------------------
-        # BUG LOCATION
+        # 2. BUG LOCATION AND ROOT CAUSE
         # ------------------------------------------------
 
         _add_heading(
@@ -434,11 +480,7 @@ def generate_fix_passport(
             [
                 [
                     "File",
-                    _get_text(
-                        bug_location,
-                        "file_path",
-                        "file"
-                    )
+                    _get_text(bug_location, "file_path", "file")
                 ],
                 [
                     "Function",
@@ -460,11 +502,7 @@ def generate_fix_passport(
             styles
         )
 
-        _add_text(
-            story,
-            "Root Cause:",
-            styles
-        )
+        _add_text(story, "Root Cause:", styles)
 
         _add_text(
             story,
@@ -472,16 +510,13 @@ def generate_fix_passport(
                 proposed_fix,
                 "root_cause",
                 "explanation",
-                default=_get_text(
-                    bug_location,
-                    "reason"
-                )
+                default=_get_text(bug_location, "reason")
             ),
             styles
         )
 
         # ------------------------------------------------
-        # PROPOSED FIX
+        # 3. PROPOSED REPAIR
         # ------------------------------------------------
 
         _add_heading(
@@ -501,16 +536,15 @@ def generate_fix_passport(
             styles
         )
 
-        _add_text(
-            story,
-            "Changed Files:",
-            styles
-        )
+        _add_text(story, "Changed Files:", styles)
 
-        changed_files = proposed_fix.get(
-            "changed_files",
-            []
-        )
+        changed_files = proposed_fix.get("changed_files", [])
+
+        if isinstance(changed_files, str):
+            changed_files = [changed_files]
+
+        if not isinstance(changed_files, list):
+            changed_files = []
 
         if not changed_files:
             changed_files = [
@@ -529,7 +563,7 @@ def generate_fix_passport(
             )
 
         # ------------------------------------------------
-        # ORIGINAL CODE
+        # 4. ORIGINAL CODE
         # ------------------------------------------------
 
         _add_heading(
@@ -545,7 +579,7 @@ def generate_fix_passport(
         )
 
         # ------------------------------------------------
-        # MODIFIED CODE
+        # 5. MODIFIED CODE
         # ------------------------------------------------
 
         _add_heading(
@@ -561,7 +595,7 @@ def generate_fix_passport(
         )
 
         # ------------------------------------------------
-        # PATCH
+        # 6. GENERATED PATCH
         # ------------------------------------------------
 
         _add_heading(
@@ -574,13 +608,16 @@ def generate_fix_passport(
             story,
             proposed_fix.get(
                 "patch",
-                proposed_fix.get("diff", "Patch details not available.")
+                proposed_fix.get(
+                    "diff",
+                    "Patch details not available."
+                )
             ),
             styles
         )
 
         # ------------------------------------------------
-        # FIX CHALLENGER
+        # 7. FIX CHALLENGER REVIEW
         # ------------------------------------------------
 
         _add_heading(
@@ -594,19 +631,11 @@ def generate_fix_passport(
             [
                 [
                     "Verdict",
-                    _get_text(
-                        challenger_review,
-                        "verdict",
-                        "approved",
-                        default="Not available"
-                    )
+                    _get_text(challenger_review, "verdict")
                 ],
                 [
                     "Explanation",
-                    _get_text(
-                        challenger_review,
-                        "explanation"
-                    )
+                    _get_text(challenger_review, "explanation")
                 ]
             ],
             styles
@@ -626,6 +655,9 @@ def generate_fix_passport(
 
             values = challenger_review.get(key, [])
 
+            if isinstance(values, str):
+                values = [values]
+
             if not values:
                 _add_text(
                     story,
@@ -641,7 +673,7 @@ def generate_fix_passport(
                     )
 
         # ------------------------------------------------
-        # VERIFICATION
+        # 8. REGRESSION VERIFICATION
         # ------------------------------------------------
 
         _add_heading(
@@ -650,21 +682,19 @@ def generate_fix_passport(
             styles
         )
 
-        passed = verification.get("passed", False)
-
         _add_table(
             story,
             [
                 [
                     "Verification",
-                    "PASSED" if passed else "NOT PASSED"
+                    "PASSED"
                 ],
                 [
                     "Test Status",
                     _get_text(
                         verification,
                         "test_status",
-                        default="Not available"
+                        default="passed"
                     )
                 ],
                 [
@@ -698,7 +728,7 @@ def generate_fix_passport(
         )
 
         # ------------------------------------------------
-        # FINAL SUMMARY
+        # 9. FINAL REPAIR SUMMARY
         # ------------------------------------------------
 
         _add_heading(
@@ -744,7 +774,10 @@ def generate_fix_passport(
             onLaterPages=_add_page_number
         )
 
-        if not report_path.exists() or report_path.stat().st_size == 0:
+        if (
+            not report_path.exists()
+            or report_path.stat().st_size == 0
+        ):
             raise RuntimeError(
                 "PDF report was not created successfully."
             )
