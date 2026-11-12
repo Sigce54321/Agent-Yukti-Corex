@@ -187,7 +187,7 @@ class FrontendRenderingTests(_FrontendCase):
         self.st.sidebar = MagicMock()
         self.st.sidebar.radio.return_value = "Dashboard"
         self.st.session_state = self.state
-        self.st.columns = Mock(side_effect=lambda count: [MagicMock() for _ in range(count if isinstance(count, int) else len(count))])
+        self.st.columns = Mock(side_effect=lambda count, **kwargs: [MagicMock() for _ in range(count if isinstance(count, int) else len(count))])
         self.st.text_input = Mock(side_effect=lambda label, **kwargs: "https://github.com/example/project" if "URL" in label else "3")
         self.st.text_area = Mock(return_value="Needs tests")
         self.st.form_submit_button = Mock(return_value=False)

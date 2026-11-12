@@ -110,7 +110,7 @@ def decision_status(state, task_id):
     return record["response"]
 
 
-def submit_decision(state, task_id, action, *, create_pull_request=True, reason=None):
+def submit_decision(state, task_id, action, *, create_pull_request=False, reason=None):
     """Allow exactly one decision per task in this session, including uncertain outcomes."""
     decisions = state.setdefault("task_decisions", {})
     if action not in ("approve", "reject"):
