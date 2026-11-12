@@ -1,6 +1,6 @@
 
-import requests
 import streamlit as st
+from ui import backend
 
 from ui.issue_form import show_issue_form
 from ui.progress import show_progress
@@ -12,7 +12,6 @@ from ui.approval import show_approval
 # BACKEND CONFIGURATION
 # --------------------------------------------------
 
-API_BASE_URL = "http://127.0.0.1:8000"
 
 
 # --------------------------------------------------
@@ -40,24 +39,7 @@ def initialize_session():
 # --------------------------------------------------
 
 def check_backend():
-
-    try:
-        response = requests.get(
-            f"{API_BASE_URL}/api/health",
-            timeout=3
-        )
-
-        if response.status_code == 200:
-            data = response.json()
-            return data if data.get("status") == "ok" else None
-
-        return None
-
-    except requests.RequestException:
-        return None
-
-    except ValueError:
-        return None
+    return backend.local_status()
 
 
 # --------------------------------------------------
@@ -217,7 +199,7 @@ def render_dashboard():
 
     if health:
 
-        st.sidebar.success("Backend Connected")
+        st.sidebar.success("Local Backend Available")
 
         docker_status = health.get("docker_available")
 
@@ -226,11 +208,11 @@ def render_dashboard():
         elif docker_status is False:
             st.sidebar.warning("Docker Unavailable")
         else:
-            st.sidebar.caption("Docker status unavailable")
+            st.sidebar.caption("Docker availability is checked when a task runs")
 
     else:
-        st.sidebar.error("Backend Disconnected")
-        st.sidebar.caption(API_BASE_URL)
+        st.sidebar.error("Local Backend Unavailable")
+        st.sidebar.caption("Check the application logs for workflow import errors")
 
     # Task information in sidebar
     st.sidebar.divider()
@@ -384,5 +366,5 @@ def render_dashboard():
     )
 
     st.caption(
-        "Streamlit Frontend | Backend API Integration"
+        "Streamlit Frontend | Direct Workflow Integration"
     )

@@ -1,32 +1,6 @@
 
-import os
-import requests
 import streamlit as st
-
-
-API_BASE_URL = os.getenv(
-    "YUKTICOREX_API_URL",
-    "http://127.0.0.1:8000"
-).rstrip("/")
-
-
-def _get_error_message(response):
-    """Extract a readable backend error message."""
-
-    try:
-        data = response.json()
-        error = data.get("error")
-
-        if isinstance(error, dict):
-            return error.get("message", response.text)
-
-        if error:
-            return str(error)
-
-        return data.get("message", response.text)
-
-    except (ValueError, AttributeError):
-        return response.text or "Backend request failed."
+from ui import backend
 
 
 def show_approval(task_id: str | None = None) -> dict | None:
@@ -51,16 +25,16 @@ def show_approval(task_id: str | None = None) -> dict | None:
         return None
 
     # Display the result of the previous approval/rejection action.
-    action_key = f"approval_response_{task_id}"
-    previous_action = st.session_state.pop(action_key, None)
+    previous_action = backend.decision_status(st.session_state, task_id)
 
     if isinstance(previous_action, dict):
-        st.success(
-            previous_action.get(
-                "message",
-                "Your decision was submitted."
-            )
-        )
+        if previous_action.get("error") or previous_action.get("status") == "failed":
+            st.error(backend.error_message(previous_action))
+        elif previous_action.get("status") == "running":
+            st.info(previous_action["message"])
+            st.button("Refresh decision", key=f"refresh_decision_{task_id}")
+        else:
+            st.success(previous_action.get("message", "Your decision was submitted."))
 
         previous_pr_url = previous_action.get("pull_request_url")
 
@@ -71,28 +45,24 @@ def show_approval(task_id: str | None = None) -> dict | None:
 
     # Fetch latest debugging results.
     try:
-        response = requests.get(
-            f"{API_BASE_URL}/api/results/{task_id}",
-            timeout=30
-        )
-
-        if response.status_code != 200:
-            st.error(_get_error_message(response))
-            return None
-
-        results = response.json()
-
-    except requests.RequestException as exc:
-        st.error(f"Backend connection failed: {exc}")
-        return None
-
-    except ValueError:
-        st.error("Backend returned an invalid JSON response.")
+        results = backend.get_task_results(task_id)
+    except backend.BackendError as exc:
+        st.error(str(exc))
         return None
 
     if not isinstance(results, dict):
         st.error("Invalid results response from backend.")
         return None
+
+    if results.get("error"):
+        st.error(backend.error_message(results))
+        return results
+    if previous_action is not None:
+        # A stale backend read must never re-enable a decision already sent.
+        results = {**results, **previous_action}
+    st.session_state["task_status"] = results.get("status", "pending")
+    if results.get("message"):
+        st.session_state["task_message"] = results["message"]
 
     # Task details
     status = results.get("status", "pending")
@@ -180,26 +150,29 @@ def show_approval(task_id: str | None = None) -> dict | None:
     if isinstance(challenger, dict) and challenger:
 
         st.write(
-            "**Challenger Approved:**",
-            challenger.get("approved")
+            "**Verdict:**",
+            challenger.get("verdict") or "Not available"
         )
 
         st.write(
-            "**Risk Level:**",
-            challenger.get("risk_level", "Not available")
+            "**Explanation:**",
+            challenger.get("explanation") or "Not available"
         )
 
-        st.write(
-            "**Summary:**",
-            challenger.get("summary", "Not available")
-        )
-
-        findings = challenger.get("findings", [])
-
-        if findings:
-            st.write("**Findings:**")
-            for finding in findings:
-                st.write(f"- {finding}")
+        for field, title in (
+            ("findings", "Findings"),
+            ("potential_regressions", "Potential Regressions"),
+            ("required_corrections", "Required Corrections"),
+        ):
+            entries = challenger.get(field) or []
+            if isinstance(entries, str):
+                entries = [entries]
+            st.write(f"**{title}:**")
+            if isinstance(entries, (list, tuple)) and entries:
+                for entry in entries:
+                    st.write(f"- {entry}")
+            else:
+                st.caption(f"No {title.lower()} reported.")
 
     else:
         st.caption("Challenger review is not available.")
@@ -249,7 +222,8 @@ def show_approval(task_id: str | None = None) -> dict | None:
 
     create_pull_request = st.checkbox(
         "Create GitHub Pull Request after approval",
-        value=True
+        value=True,
+        key=f"create_pr_{task_id}"
     )
 
     approve_clicked = st.button(
@@ -262,34 +236,16 @@ def show_approval(task_id: str | None = None) -> dict | None:
     if approve_clicked:
 
         try:
-            approval_response = requests.post(
-                f"{API_BASE_URL}/api/approve",
-                json={
-                    "task_id": task_id,
-                    "create_pull_request": create_pull_request
-                },
-                timeout=60
+            action_data = backend.submit_decision(
+                st.session_state, task_id, "approve",
+                create_pull_request=create_pull_request,
             )
-
-            if approval_response.status_code in (200, 202):
-
-                try:
-                    action_data = approval_response.json()
-                except ValueError:
-                    st.error("Invalid approval response from backend.")
-                    return results
-
-                st.session_state[action_key] = action_data
-                st.rerun()
-
-            else:
-                st.error(
-                    "Approval failed: "
-                    + _get_error_message(approval_response)
-                )
-
-        except requests.RequestException as exc:
-            st.error(f"Approval request failed: {exc}")
+        except backend.BackendError as exc:
+            st.error(str(exc))
+            return results
+        st.session_state["task_status"] = action_data.get("status", "running")
+        st.rerun()
+        return action_data
 
     # Rejection form
     with st.form(key=f"reject_form_{task_id}"):
@@ -308,33 +264,14 @@ def show_approval(task_id: str | None = None) -> dict | None:
         if reject_clicked:
 
             try:
-                reject_response = requests.post(
-                    f"{API_BASE_URL}/api/reject",
-                    json={
-                        "task_id": task_id,
-                        "reason": reason.strip() or None
-                    },
-                    timeout=30
+                action_data = backend.submit_decision(
+                    st.session_state, task_id, "reject", reason=reason.strip() or None,
                 )
-
-                if reject_response.status_code in (200, 202):
-
-                    try:
-                        action_data = reject_response.json()
-                    except ValueError:
-                        st.error("Invalid rejection response from backend.")
-                        return results
-
-                    st.session_state[action_key] = action_data
-                    st.rerun()
-
-                else:
-                    st.error(
-                        "Rejection failed: "
-                        + _get_error_message(reject_response)
-                    )
-
-            except requests.RequestException as exc:
-                st.error(f"Rejection request failed: {exc}")
+            except backend.BackendError as exc:
+                st.error(str(exc))
+                return results
+            st.session_state["task_status"] = action_data.get("status", "running")
+            st.rerun()
+            return action_data
 
     return results

@@ -1,17 +1,12 @@
 
-import os
-import requests
 import streamlit as st
+from ui import backend
 
 
 # --------------------------------------------------
 # BACKEND CONFIGURATION
 # --------------------------------------------------
 
-API_BASE_URL = os.getenv(
-    "YUKTICOREX_API_URL",
-    "http://127.0.0.1:8000"
-).rstrip("/")
 
 
 # --------------------------------------------------
@@ -50,29 +45,6 @@ VALID_STAGES = [
 # ERROR HANDLING
 # --------------------------------------------------
 
-def _get_error_message(response):
-    """Extract a readable error message from the backend."""
-
-    try:
-        data = response.json()
-        error = data.get("error")
-
-        if isinstance(error, dict):
-            return error.get(
-                "message",
-                "Unable to retrieve debugging progress."
-            )
-
-        if error:
-            return str(error)
-
-        return data.get(
-            "message",
-            response.text or "Backend request failed."
-        )
-
-    except (ValueError, AttributeError):
-        return response.text or "Backend request failed."
 
 
 # --------------------------------------------------
@@ -147,8 +119,7 @@ def show_progress(task_id: str | None = None) -> dict | None:
         task_id: Unique debugging task ID.
                  If omitted, reads from Streamlit session state.
 
-    Backend endpoint:
-        GET /api/progress/{task_id}
+    Uses the local get_task_progress function on every page refresh.
 
     Expected response:
         {
@@ -203,29 +174,7 @@ def show_progress(task_id: str | None = None) -> dict | None:
 
     try:
 
-        response = requests.get(
-            f"{API_BASE_URL}/api/progress/{task_id}",
-            timeout=30
-        )
-
-        try:
-            data = response.json()
-
-        except ValueError:
-            st.error(
-                "Backend returned an invalid JSON response."
-            )
-            return None
-
-        # --------------------------------------------------
-        # HANDLE API ERRORS
-        # --------------------------------------------------
-
-        if response.status_code != 200:
-
-            st.error(_get_error_message(response))
-
-            return data if isinstance(data, dict) else None
+        data = backend.get_task_progress(task_id)
 
         if not isinstance(data, dict):
             st.error(
@@ -274,6 +223,8 @@ def show_progress(task_id: str | None = None) -> dict | None:
 
         if stage:
             st.session_state["task_stage"] = stage
+        if message:
+            st.session_state["task_message"] = message
 
         # --------------------------------------------------
         # DISPLAY TASK INFORMATION
@@ -361,28 +312,6 @@ def show_progress(task_id: str | None = None) -> dict | None:
     # CONNECTION ERROR HANDLING
     # --------------------------------------------------
 
-    except requests.Timeout:
-
-        st.error(
-            "Backend request timed out. "
-            "Please check the backend service."
-        )
-
-        return None
-
-    except requests.ConnectionError:
-
-        st.error(
-            "Cannot connect to the backend. "
-            f"Please check {API_BASE_URL}"
-        )
-
-        return None
-
-    except requests.RequestException as exc:
-
-        st.error(
-            f"Could not retrieve debugging progress: {exc}"
-        )
-
+    except backend.BackendError as exc:
+        st.error(str(exc))
         return None
