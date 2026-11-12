@@ -349,7 +349,7 @@ def render_agents(stage=None, status=None):
     from ui.visuals import title, icon
     st.markdown(title("Agent Status", "bug"), unsafe_allow_html=True)
     agents = [("Issue Analyzer", "analyzing_issue", "flask"), ("Bug Locator", "locating_bug", "bug"), ("Fix Generator", "generating_fix", "code"), ("Fix Challenger", "challenging_fix", "shield")]
-    html = '<div class="agent-grid">'
+    html = '<div class="agent-grid" style="gap:18px !important;">'
     for name, agent_stage, symbol in agents:
         activity, css = "Pending", ""
         if stage == agent_stage:
@@ -358,5 +358,6 @@ def render_agents(stage=None, status=None):
         elif stage in VALID_STAGES and VALID_STAGES.index(stage) > VALID_STAGES.index(agent_stage):
             activity = "Earlier stage"
         html += f'<div class="agent-card {css}"><div class="agent-icon">{icon(symbol, 24)}</div><div><b>{name}</b><small><span class="activity-dot"></span>{activity}</small></div></div>'
-    st.markdown(html + '</div>', unsafe_allow_html=True)
-    st.caption("Stage-derived activity · individual agent telemetry unavailable")
+    html += '</div>'
+    html += '<div style="margin-top:16px; padding:0 4px; color:#aab7cb; font-size:0.82rem; line-height:1.5;">Stage-derived activity · individual agent telemetry unavailable</div>'
+    st.markdown(html, unsafe_allow_html=True)
