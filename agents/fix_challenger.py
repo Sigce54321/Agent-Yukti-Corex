@@ -93,3 +93,28 @@ PROPOSED PATCH:
         raise ValueError(
             f"Fix Challenger returned invalid structured output: {exc}"
         ) from exc
+def challenge_fix_for_backend(issue_analysis, bug_location, proposed_fix):
+    """
+    Adapter for the main backend workflow.
+    """
+
+    review = challenge_fix(
+        issue_analysis=json.dumps(issue_analysis, indent=2),
+        bug_location=json.dumps(bug_location, indent=2),
+        repository_code=proposed_fix["original_code"],
+        proposed_patch=proposed_fix["modified_code"],
+    )
+
+    risk_level = (
+        "medium"
+        if review.potential_regressions or review.required_corrections
+        else "low"
+    )
+
+    return {
+        "approved": review.verdict == "APPROVE",
+        "risk_level": risk_level,
+        "findings": review.findings,
+        "potential_regressions": review.potential_regressions,
+        "explanation": review.explanation,
+    }

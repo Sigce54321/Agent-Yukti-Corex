@@ -1,23 +1,23 @@
+import inspect
 
-from core.workflow import run_repair_workflow
+import core.workflow as workflow
 
-result = run_repair_workflow(
-    issue_text="""
-    The calculator crashes when dividing a number by zero.
-    Expected: Handle division by zero safely.
-    Actual: ZeroDivisionError.
-    """,
-    repository_code="""
-    File: calculator.py
 
-    def divide(a, b):
-        return a / b
-    """,
-)
+def test_workflow_module_imports():
+    """Verify that the backend workflow module imports successfully."""
 
-print("========== YUKTIC-OREX WORKFLOW ==========")
+    assert workflow is not None
 
-for stage, output in result.items():
-    print(f"\n--- {stage.upper()} ---")
-    print(output)
 
+def test_workflow_has_public_functions():
+    """Verify that workflow exposes callable functions."""
+
+    functions = [
+        name
+        for name, member in inspect.getmembers(workflow, inspect.isfunction)
+        if not name.startswith("_")
+    ]
+
+    assert len(functions) > 0, (
+        "No public workflow functions found in core/workflow.py"
+    )

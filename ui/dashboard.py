@@ -1,4 +1,4 @@
-﻿"""Compose the screenshot-inspired workspace around existing guarded UI modules."""
+"""Compose the screenshot-inspired workspace around existing guarded UI modules."""
 import streamlit as st
 from ui import backend
 from ui.issue_form import show_issue_form

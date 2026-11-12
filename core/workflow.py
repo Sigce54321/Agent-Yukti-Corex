@@ -1,4 +1,5 @@
 
+import difflib
 import os
 import re
 import json
@@ -11,6 +12,8 @@ import threading
 from pathlib import Path
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
+MAX_REPAIR_RETRIES = 2
+
 
 
 # ============================================================
@@ -362,6 +365,7 @@ def _require_dict(result, module_name):
     return result
 
 
+
 # ============================================================
 # REPOSITORY SUMMARY
 # ============================================================
@@ -369,9 +373,20 @@ def _require_dict(result, module_name):
 def _repository_summary(repository_path):
     """
     Build a limited text summary for the Issue Analyzer.
+
+    Symbolic links are skipped to prevent reading files
+    outside the repository.
     """
 
-    root = Path(repository_path).resolve()
+    root = Path(repository_path).resolve(strict=True)
+
+    if not root.is_dir():
+        raise WorkflowError(
+            "INTERNAL_ERROR",
+            "Repository path is not a directory.",
+            str(root),
+            "analyzing_issue"
+        )
 
     ignored_directories = {
         ".git",
@@ -401,13 +416,46 @@ def _repository_summary(repository_path):
     maximum_characters = 30000
 
     try:
-        for current_root, directories, filenames in os.walk(root):
+        for current_root, directories, filenames in os.walk(
+            root,
+            topdown=True,
+            followlinks=False
+        ):
 
-            directories[:] = [
-                directory
-                for directory in directories
-                if directory not in ignored_directories
-            ]
+            current_path = Path(current_root).resolve(strict=True)
+
+            # Ensure traversal remains inside the repository.
+            try:
+                current_path.relative_to(root)
+            except ValueError:
+                directories[:] = []
+                continue
+
+            # Remove ignored and symbolic-link directories.
+            safe_directories = []
+
+            for directory in directories:
+                directory_path = Path(current_root) / directory
+
+                if directory in ignored_directories:
+                    continue
+
+                if directory_path.is_symlink():
+                    continue
+
+                try:
+                    resolved_directory = directory_path.resolve(
+                        strict=True
+                    )
+                    resolved_directory.relative_to(root)
+
+                    if resolved_directory.is_dir():
+                        safe_directories.append(directory)
+
+                except (OSError, ValueError):
+                    continue
+
+            directories[:] = safe_directories
 
             for filename in filenames:
 
@@ -417,9 +465,19 @@ def _repository_summary(repository_path):
                     continue
 
                 try:
-                    relative_path = file_path.relative_to(root)
+                    # Never read symbolic-link files.
+                    if file_path.is_symlink():
+                        continue
 
-                    content = file_path.read_text(
+                    resolved_file = file_path.resolve(strict=True)
+
+                    # Ensure the resolved file remains inside the repo.
+                    resolved_file.relative_to(root)
+
+                    if not resolved_file.is_file():
+                        continue
+
+                    content = resolved_file.read_text(
                         encoding="utf-8",
                         errors="replace"
                     )
@@ -430,6 +488,8 @@ def _repository_summary(repository_path):
                         break
 
                     content = content[:remaining]
+
+                    relative_path = resolved_file.relative_to(root)
 
                     files.append({
                         "file_path": str(relative_path).replace("\\", "/"),
@@ -457,6 +517,7 @@ def _repository_summary(repository_path):
         "files": files,
         "file_count": len(files)
     }
+
 
 
 # ============================================================
@@ -577,6 +638,7 @@ def _validate_bug_location(bug_location):
     return bug_location
 
 
+
 def _validate_proposed_fix(proposed_fix, bug_location):
     if not isinstance(proposed_fix, dict):
         raise WorkflowError(
@@ -589,6 +651,7 @@ def _validate_proposed_fix(proposed_fix, bug_location):
     required_fields = [
         "file_path",
         "original_code",
+        "repository_code",
         "modified_code"
     ]
 
@@ -600,6 +663,14 @@ def _validate_proposed_fix(proposed_fix, bug_location):
                 "Missing or invalid field: {}".format(field),
                 "generating_fix"
             )
+
+    if not proposed_fix["repository_code"].strip():
+        raise WorkflowError(
+            "PATCH_INVALID",
+            "Repair Agent returned an empty original file.",
+            "Repository code cannot be empty.",
+            "generating_fix"
+        )
 
     if not proposed_fix["modified_code"].strip():
         raise WorkflowError(
@@ -625,7 +696,16 @@ def _validate_proposed_fix(proposed_fix, bug_location):
             "generating_fix"
         )
 
+    if proposed_fix["original_code"] not in proposed_fix["repository_code"]:
+        raise WorkflowError(
+            "PATCH_INVALID",
+            "Buggy code was not found in the original file.",
+            "The Repair Agent returned inconsistent source code.",
+            "generating_fix"
+        )
+
     return proposed_fix
+
 
 
 # ============================================================
@@ -911,10 +991,22 @@ def _run_workflow(task_id):
                 "baseline_testing"
             )
 
+      
         _update_task(
             task_id,
             baseline_result=baseline_result
         )
+
+        # Stop if the original bug was not reproduced.
+        if baseline_result["test_status"] == "passed":
+            raise WorkflowError(
+                "BASELINE_TEST_FAILED",
+                "Baseline tests passed. The reported bug was not reproduced. "
+                "Repair workflow stopped.",
+                baseline_result.get("logs", ""),
+                "baseline_testing"
+            )
+
 
         # ----------------------------------------------------
         # 7. PREPARE REPOSITORY SUMMARY
@@ -936,7 +1028,7 @@ def _run_workflow(task_id):
 
         issue_analysis = _call(
             "agents.issue_analyzer",
-            "analyze_issue",
+            "analyze_issue_for_backend",
             issue,
             repository_summary
         )
@@ -971,9 +1063,9 @@ def _run_workflow(task_id):
 
         bug_location = _call(
             "agents.bug_locator",
-            "locate_bug",
+            "locate_bug_for_backend",
             issue_analysis,
-            repository_path,
+            _repository_summary(repository_path),
             language
         )
 
@@ -986,213 +1078,383 @@ def _run_workflow(task_id):
             bug_location=bug_location
         )
 
-        # ----------------------------------------------------
-        # 10. REPAIR AGENT
-        # ----------------------------------------------------
-
-        _set_stage(
-            task_id,
-            "generating_fix",
-            "Repair Agent is generating a proposed fix."
-        )
-
-        proposed_fix = _call(
-            "agents.repair_agent",
-            "propose_fix",
-            bug_location,
-            issue_analysis,
-            workspace_path
-        )
-
-        proposed_fix = _validate_proposed_fix(
-            proposed_fix,
-            bug_location
-        )
-
-        _update_task(
-            task_id,
-            proposed_fix=proposed_fix
-        )
 
         # ----------------------------------------------------
-        # 11. FIX CHALLENGER
+        # 10–15. REPAIR, CHALLENGE, APPLY, RETRY AND VERIFY
         # ----------------------------------------------------
 
-        _set_stage(
-            task_id,
-            "challenging_fix",
-            "Fix Challenger is reviewing the proposed fix."
-        )
+        repair_history = []
+        regression_result = None
+        verification = None
+        proposed_fix = None
+        challenger_review = None
+        patch = None
 
-        challenger_review = _call(
-            "agents.fix_challenger",
-            "challenge_fix",
-            issue_analysis,
-            bug_location,
-            proposed_fix
-        )
+        for attempt in range(1, MAX_REPAIR_RETRIES + 2):
 
-        challenger_review = _require_dict(
-            challenger_review,
-            "Fix Challenger"
-        )
-
-        allowed_risks = {
-            "low",
-            "medium",
-            "high"
-        }
-
-        if (
-            challenger_review.get("approved") is not True
-            or challenger_review.get("risk_level") not in allowed_risks
-        ):
-            raise WorkflowError(
-                "PATCH_INVALID",
-                "Fix Challenger did not approve the proposed fix.",
-                str(challenger_review),
-                "challenging_fix"
+            _update_task(
+                task_id,
+                repair_attempt=attempt,
+                repair_retries_used=attempt - 1,
+                repair_history=repair_history
             )
 
-        if challenger_review.get("risk_level") == "high":
-            raise WorkflowError(
-                "PATCH_INVALID",
-                "The proposed fix has a high risk level.",
-                challenger_review.get("summary", ""),
-                "challenging_fix"
+            # 10. Generate or regenerate the repair.
+            _set_stage(
+                task_id,
+                "generating_fix",
+                "Repair Agent is generating repair attempt {}/{}.".format(
+                    attempt,
+                    MAX_REPAIR_RETRIES + 1
+                )
             )
 
-        _update_task(
-            task_id,
-            challenger_review=challenger_review
-        )
+            retry_issue_analysis = dict(issue_analysis)
 
-        # ----------------------------------------------------
-        # 12. CREATE PATCH
-        # ----------------------------------------------------
+            if repair_history:
+                previous_attempt = repair_history[-1]
 
-        _set_stage(
-            task_id,
-            "applying_patch",
-            "Validating the proposed code patch."
-        )
+                retry_issue_analysis["previous_attempt_feedback"] = {
+                    "attempt": previous_attempt["attempt"],
+                    "test_status": previous_attempt["test_status"],
+                    "passed": previous_attempt["passed"],
+                    "logs": previous_attempt["logs"][-8000:],
+                    "instructions": (
+                        "The previous repair failed regression testing. "
+                        "Analyze the failure logs and generate a corrected "
+                        "minimal repair. Do not repeat the previous mistake."
+                    )
+                }
 
-        patch = _call(
-            "core.patch_manager",
-            "create_patch",
-            workspace_path,
-            proposed_fix["file_path"],
-            proposed_fix["modified_code"]
-        )
-
-        patch = _require_dict(
-            patch,
-            "Patch Manager"
-        )
-
-        if not patch.get("success"):
-            raise WorkflowError(
-                "PATCH_INVALID",
-                "Patch Manager could not create the patch.",
-                str(patch.get("error")),
-                "applying_patch"
+            proposed_fix = _call(
+                "agents.repair_agent",
+                "propose_fix_for_backend",
+                bug_location,
+                retry_issue_analysis,
+                _repository_summary(workspace_path)
             )
 
-        if patch.get("original_code") != proposed_fix["original_code"]:
-            raise WorkflowError(
-                "PATCH_INVALID",
-                "The original file changed before patch creation.",
-                "The proposed fix does not match the current file.",
-                "applying_patch"
+            proposed_fix = _validate_proposed_fix(
+                proposed_fix,
+                bug_location
             )
 
-        if patch.get("file_path") != proposed_fix["file_path"]:
-            raise WorkflowError(
-                "PATCH_INVALID",
-                "Patch file path does not match the proposed fix.",
-                str(patch.get("file_path")),
-                "applying_patch"
+
+            # 11. Fix Challenger reviews every repair attempt.
+            _set_stage(
+                task_id,
+                "challenging_fix",
+                "Fix Challenger is reviewing repair attempt {}.".format(
+                    attempt
+                )
             )
 
-        # ----------------------------------------------------
-        # 13. APPLY PATCH
-        # ----------------------------------------------------
-
-        apply_result = _call(
-            "core.patch_manager",
-            "apply_patch",
-            workspace_path,
-            patch
-        )
-
-        apply_result = _require_dict(
-            apply_result,
-            "Patch Manager"
-        )
-
-        if not apply_result.get("success"):
-            raise WorkflowError(
-                "PATCH_APPLY_FAILED",
-                "The proposed patch could not be applied.",
-                str(apply_result.get("error")),
-                "applying_patch"
+            issue_analysis_text = json.dumps(
+                retry_issue_analysis,
+                indent=2,
+                ensure_ascii=False
             )
 
-        # Get actual difference after applying the patch.
-        diff_result = _call(
-            "core.patch_manager",
-            "get_file_diff",
-            workspace_path,
-            proposed_fix["file_path"]
-        )
+            bug_location_text = json.dumps(
+                bug_location,
+                indent=2,
+                ensure_ascii=False
+            )
 
-        diff_result = _require_dict(
-            diff_result,
-            "Patch Manager"
-        )
+            repository_code = proposed_fix["repository_code"]
 
-        actual_diff = diff_result.get("diff", "")
+            proposed_patch = "\n".join(
+                difflib.unified_diff(
+                    repository_code.splitlines(),
+                    proposed_fix["modified_code"].splitlines(),
+                    fromfile="a/{}".format(proposed_fix["file_path"]),
+                    tofile="b/{}".format(proposed_fix["file_path"]),
+                    lineterm=""
+                )
+            )
 
-        proposed_fix["diff"] = actual_diff
+            if not proposed_patch.strip():
+                raise WorkflowError(
+                    "PATCH_INVALID",
+                    "The proposed repair contains no changes.",
+                    "Repair Agent returned an empty difference.",
+                    "challenging_fix"
+                )
 
-        _update_task(
-            task_id,
-            patch=patch,
-            apply_result=apply_result,
-            diff=actual_diff,
-            proposed_fix=proposed_fix
-        )
+            challenger_result = _call(
+                "agents.fix_challenger",
+                "challenge_fix",
+                issue_analysis_text,
+                bug_location_text,
+                repository_code,
+                proposed_patch
+            )
 
-        # ----------------------------------------------------
-        # 14. REGRESSION TESTING
-        # ----------------------------------------------------
+            if hasattr(challenger_result, "model_dump"):
+                challenger_review = challenger_result.model_dump()
 
+            elif isinstance(challenger_result, dict):
+                challenger_review = challenger_result
+
+            else:
+                raise WorkflowError(
+                    "AI_INVALID_RESPONSE",
+                    "Fix Challenger returned an invalid response.",
+                    "Expected ChallengeReview or dictionary.",
+                    "challenging_fix"
+                )
+
+            if challenger_review.get("verdict") not in {
+                "APPROVE",
+                "REJECT"
+            }:
+                raise WorkflowError(
+                    "AI_INVALID_RESPONSE",
+                    "Fix Challenger returned an invalid verdict.",
+                    str(challenger_review),
+                    "challenging_fix"
+                )
+
+            if challenger_review["verdict"] != "APPROVE":
+                raise WorkflowError(
+                    "PATCH_INVALID",
+                    "Fix Challenger rejected the proposed repair.",
+                    json.dumps(challenger_review, indent=2),
+                    "challenging_fix"
+                )
+
+            _update_task(
+                task_id,
+                proposed_fix=proposed_fix,
+                challenger_review=challenger_review
+            )
+
+            # 12. Create the patch.
+            _set_stage(
+                task_id,
+                "applying_patch",
+                "Creating patch for repair attempt {}.".format(attempt)
+            )
+
+            patch = _call(
+                "core.patch_manager",
+                "create_patch",
+                workspace_path,
+                proposed_fix["file_path"],
+                proposed_fix["modified_code"]
+            )
+
+            patch = _require_dict(
+                patch,
+                "Patch Manager"
+            )
+
+            if not patch.get("success"):
+                raise WorkflowError(
+                    "PATCH_INVALID",
+                    "Could not create the repair patch.",
+                    str(patch.get("error")),
+                    "applying_patch"
+                )
+
+            if patch.get("file_path") != proposed_fix["file_path"]:
+                raise WorkflowError(
+                    "PATCH_INVALID",
+                    "Patch file path does not match the proposed repair.",
+                    "Unexpected patch file path.",
+                    "applying_patch"
+                )
+
+            # 13. Apply the patch.
+            apply_result = _call(
+                "core.patch_manager",
+                "apply_patch",
+                workspace_path,
+                patch
+            )
+
+            apply_result = _require_dict(
+                apply_result,
+                "Patch Manager"
+            )
+
+            if not apply_result.get("success"):
+                raise WorkflowError(
+                    "PATCH_APPLY_FAILED",
+                    "Could not apply the proposed repair.",
+                    str(apply_result.get("error")),
+                    "applying_patch"
+                )
+
+            diff_result = _call(
+                "core.patch_manager",
+                "get_file_diff",
+                workspace_path,
+                proposed_fix["file_path"]
+            )
+
+            diff_result = _require_dict(
+                diff_result,
+                "Patch Manager"
+            )
+
+            if not diff_result.get("success"):
+                raise WorkflowError(
+                    "PATCH_INVALID",
+                    "Could not generate the actual file difference.",
+                    str(diff_result.get("error")),
+                    "applying_patch"
+                )
+
+            actual_diff = diff_result.get("diff", "")
+            proposed_fix["diff"] = actual_diff
+
+            _update_task(
+                task_id,
+                patch=patch,
+                apply_result=apply_result,
+                diff=actual_diff,
+                proposed_fix=proposed_fix
+            )
+
+            # 14. Run regression tests.
+            _set_stage(
+                task_id,
+                "regression_testing",
+                "Running regression tests for repair attempt {}.".format(
+                    attempt
+                )
+            )
+
+            regression_result = _call(
+                "verification.regression",
+                "run_regression_tests",
+                workspace_path,
+                language
+            )
+
+            regression_result = _validate_test_result(
+                regression_result,
+                "regression_testing"
+            )
+
+            _update_task(
+                task_id,
+                regression_result=regression_result
+            )
+
+            # Stop retrying when all regression tests pass.
+            if (
+                regression_result.get("passed") is True
+                and regression_result.get("test_status") == "passed"
+            ):
+                repair_history.append({
+                    "attempt": attempt,
+                    "test_status": "passed",
+                    "passed": True,
+                    "logs": str(regression_result.get("logs", ""))
+                })
+
+                _update_task(
+                    task_id,
+                    repair_history=repair_history,
+                    repair_attempt=attempt,
+                    repair_retries_used=attempt - 1
+                )
+
+                break
+
+            # Do not retry infrastructure or execution errors.
+            if regression_result.get("test_status") != "failed":
+                raise WorkflowError(
+                    "CONTAINER_EXECUTION_FAILED",
+                    "Regression testing could not complete successfully. "
+                    "Automatic repair retries were stopped.",
+                    str(regression_result.get("logs", "")),
+                    "regression_testing"
+                )
+
+            # Record the failed attempt.
+            repair_history.append({
+                "attempt": attempt,
+                "test_status": regression_result.get("test_status"),
+                "passed": regression_result.get("passed"),
+                "logs": str(regression_result.get("logs", ""))
+            })
+
+            _update_task(
+                task_id,
+                repair_history=repair_history,
+                repair_attempt=attempt,
+                repair_retries_used=attempt - 1
+            )
+
+            # Stop after the initial attempt and two retries.
+            if attempt >= MAX_REPAIR_RETRIES + 1:
+                raise WorkflowError(
+                    "REGRESSION_TEST_FAILED",
+                    "The repair failed after the initial attempt "
+                    "and two automatic retries.",
+                    str(regression_result.get("logs", "")),
+                    "regression_testing"
+                )
+
+            # Restore the original complete file before retrying.
+            _set_stage(
+                task_id,
+                "applying_patch",
+                "Restoring the original file before repair retry {}.".format(
+                    attempt + 1
+                )
+            )
+
+            restore_patch = _call(
+                "core.patch_manager",
+                "create_patch",
+                workspace_path,
+                patch["file_path"],
+                patch["original_code"]
+            )
+
+            restore_patch = _require_dict(
+                restore_patch,
+                "Patch Manager"
+            )
+
+            if not restore_patch.get("success"):
+                raise WorkflowError(
+                    "PATCH_APPLY_FAILED",
+                    "Could not create the original-file restoration patch.",
+                    str(restore_patch.get("error")),
+                    "applying_patch"
+                )
+
+            restore_result = _call(
+                "core.patch_manager",
+                "apply_patch",
+                workspace_path,
+                restore_patch
+            )
+
+            restore_result = _require_dict(
+                restore_result,
+                "Patch Manager"
+            )
+
+            if not restore_result.get("success"):
+                raise WorkflowError(
+                    "PATCH_APPLY_FAILED",
+                    "Could not restore the original file before retrying.",
+                    str(restore_result.get("error")),
+                    "applying_patch"
+                )
+
+        # 15. Verify the successful repair.
         _set_stage(
             task_id,
             "regression_testing",
-            "Running regression tests in Docker."
+            "Verifying the successful repair."
         )
-
-        regression_result = _call(
-            "verification.regression",
-            "run_regression_tests",
-            workspace_path,
-            language
-        )
-
-        regression_result = _validate_test_result(
-            regression_result,
-            "regression_testing"
-        )
-
-        _update_task(
-            task_id,
-            regression_result=regression_result
-        )
-
-        # ----------------------------------------------------
-        # 15. VERIFY FIX
-        # ----------------------------------------------------
 
         verification = _call(
             "verification.verifier",
@@ -1203,7 +1465,7 @@ def _run_workflow(task_id):
 
         verification = _require_dict(
             verification,
-            "Fix Verifier"
+            "Verifier"
         )
 
         verification["baseline"] = baseline_result
@@ -1217,14 +1479,18 @@ def _run_workflow(task_id):
             raise WorkflowError(
                 "REGRESSION_TEST_FAILED",
                 "The proposed fix did not pass verification.",
-                regression_result.get("logs", ""),
+                str(regression_result.get("logs", "")),
                 "regression_testing"
             )
 
         _update_task(
             task_id,
-            verification=verification
+            verification=verification,
+            repair_history=repair_history,
+            repair_attempt=attempt,
+            repair_retries_used=attempt - 1
         )
+
 
         # ----------------------------------------------------
         # 16. GENERATE FIX PASSPORT
