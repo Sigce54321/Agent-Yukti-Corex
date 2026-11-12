@@ -1,12 +1,6 @@
 
-import os
-import requests
 import streamlit as st
-
-API_BASE_URL = os.getenv(
-    "YUKTICOREX_API_URL",
-    "http://127.0.0.1:8000"
-).rstrip("/")
+from ui import backend
 
 
 def _display_code(title: str, code: str, language: str) -> None:
@@ -72,7 +66,7 @@ def _display_test_result(title: str, result: dict) -> None:
 
 def render_results(task_id: str) -> dict | None:
     """
-    Fetch and display debugging results through the backend API.
+    Fetch and display debugging results from the local workflow.
 
     Args:
         task_id: Unique debugging task ID.
@@ -89,26 +83,7 @@ def render_results(task_id: str) -> dict | None:
         return None
 
     try:
-        response = requests.get(
-            f"{API_BASE_URL}/api/results/{task_id}",
-            timeout=30
-        )
-
-        try:
-            results = response.json()
-        except ValueError:
-            st.error("Backend returned an invalid JSON response.")
-            return None
-
-        if response.status_code >= 400:
-            error = results.get("error", {})
-            message = (
-                error.get("message", "Unable to retrieve results.")
-                if isinstance(error, dict)
-                else str(error)
-            )
-            st.error(message)
-            return results
+        results = backend.get_task_results(task_id)
 
         if not isinstance(results, dict):
             st.error("Invalid results response from backend.")
@@ -141,6 +116,14 @@ def render_results(task_id: str) -> dict | None:
 
         if status == "failed":
             st.error("The debugging workflow failed.")
+            return results
+
+        if status == "rejected":
+            st.warning("This proposed fix has been rejected. The backend does not expose repair evidence for rejected tasks.")
+            return results
+
+        if status not in ("awaiting_approval", "approved"):
+            st.info(results.get("message") or "Repair evidence is not available yet.")
             return results
 
         # Identified bug
@@ -205,29 +188,29 @@ def render_results(task_id: str) -> dict | None:
         if isinstance(challenger, dict) and challenger:
 
             st.write(
-                f"**Approved by Challenger:** "
-                f"{challenger.get('approved')}"
+                f"**Verdict:** "
+                f"{challenger.get('verdict') or 'Not available'}"
             )
 
             st.write(
-                f"**Risk Level:** "
-                f"{challenger.get('risk_level', 'Not available')}"
+                f"**Explanation:** "
+                f"{challenger.get('explanation') or 'Not available'}"
             )
 
-            st.write(
-                f"**Summary:** "
-                f"{challenger.get('summary', 'Not available')}"
-            )
-
-            findings = challenger.get("findings", [])
-
-            if findings:
-                st.write("**Findings:**")
-
-                for finding in findings:
-                    st.write(f"- {finding}")
-            else:
-                st.write("No findings reported.")
+            for field, title in (
+                ("findings", "Findings"),
+                ("potential_regressions", "Potential Regressions"),
+                ("required_corrections", "Required Corrections"),
+            ):
+                entries = challenger.get(field) or []
+                if isinstance(entries, str):
+                    entries = [entries]
+                st.write(f"**{title}:**")
+                if isinstance(entries, (list, tuple)) and entries:
+                    for entry in entries:
+                        st.write(f"- {entry}")
+                else:
+                    st.caption(f"No {title.lower()} reported.")
 
         else:
             st.caption("Challenger review is not available.")
@@ -265,6 +248,9 @@ def render_results(task_id: str) -> dict | None:
         else:
             st.caption("Verification results are not available.")
 
+        st.markdown("### Fix Passport")
+        st.caption("The workflow generates a Fix Passport, but the current results interface does not expose its contents or a download. Preview and download are unavailable.")
+
         # GitHub Pull Request
         pull_request_url = results.get("pull_request_url")
 
@@ -276,6 +262,63 @@ def render_results(task_id: str) -> dict | None:
 
         return results
 
-    except requests.RequestException as exc:
-        st.error(f"Could not retrieve debugging results: {exc}")
+    except backend.BackendError as exc:
+        st.error(str(exc))
         return None
+
+
+def render_evidence_grid(results):
+    """Compact live-evidence columns matching the supplied repair workspace."""
+    from ui.visuals import title, row, text, badge, status_tone, patch_counts
+    location, patch, review = st.columns([1.02, 1.6, 1.16], gap="small")
+    with location:
+        with st.container(border=True, key="location_panel"):
+            st.markdown(title("Bug Location & Result", "bug"), unsafe_allow_html=True)
+            st.markdown(row("File", results.get("bug_file")) + row("Function", results.get("bug_location")) + row("Language", results.get("language")), unsafe_allow_html=True)
+            reason = results.get("bug_explanation")
+            st.markdown('<div class="result-callout"><b>◎ Analysis result</b><p>' + text(reason, "Bug location and explanation will appear after workflow analysis.") + '</p></div>', unsafe_allow_html=True)
+    with patch:
+        with st.container(border=True, key="patch_panel"):
+            st.markdown(title("Patch Diff Preview", "code"), unsafe_allow_html=True)
+            counts = patch_counts(results.get("diff"))
+            st.markdown('<div class="patch-file">' + text(results.get("bug_file"), "Awaiting proposed patch") + (f'<span class="diff-count">+{counts[0]} −{counts[1]}</span>' if counts else '') + '</div>', unsafe_allow_html=True)
+            if results.get("diff"):
+                st.code(results["diff"], language="diff")
+            else:
+                st.markdown('<div class="empty-diff"><span>− original lines</span><span>+ proposed changes</span><p>No patch returned yet.</p></div>', unsafe_allow_html=True)
+            with st.expander("Original / modified code"):
+                language = results.get("language") or "text"
+                _display_code("Original Code", results.get("original_code", ""), language)
+                _display_code("Modified Code", results.get("modified_code", ""), language)
+    with review:
+        with st.container(border=True, key="challenger_panel"):
+            st.markdown(title("Fix Challenger Review", "shield"), unsafe_allow_html=True)
+            challenger = results.get("challenger_review") or {}
+            if isinstance(challenger, dict) and challenger:
+                st.markdown(badge(challenger.get("verdict", "Unavailable"), status_tone(challenger.get("verdict"))), unsafe_allow_html=True)
+                st.write(challenger.get("explanation") or "Explanation unavailable.")
+                with st.expander("Findings & corrections"):
+                    for field, label in (("findings", "Findings"), ("potential_regressions", "Potential Regressions"), ("required_corrections", "Required Corrections")):
+                        st.write(f"**{label}:**")
+                        entries = challenger.get(field) or []
+                        if isinstance(entries, str):
+                            entries = [entries]
+                        if isinstance(entries, (list, tuple)) and entries:
+                            for entry in entries:
+                                st.write(f"- {entry}")
+                        else:
+                            st.caption(f"No {label.lower()} reported.")
+            else:
+                st.markdown(badge("Awaiting review"), unsafe_allow_html=True)
+                st.caption("Independent Challenger reasoning will appear here. No verdict available yet.")
+        with st.container(border=True, key="verification_panel"):
+            st.markdown(title("Regression Verification", "flask"), unsafe_allow_html=True)
+            verification = results.get("verification") or {}
+            for field, label in (("baseline", "Baseline tests"), ("regression", "Regression tests")):
+                evidence = verification.get(field) or {}
+                state = evidence.get("test_status", "not_run")
+                st.markdown('<div class="test-row"><span>' + label + '</span>' + badge(state.replace("_", " "), status_tone(state)) + '</div>', unsafe_allow_html=True)
+                if evidence:
+                    with st.expander(label + " evidence"):
+                        _display_test_result(label, evidence)
+            st.caption("Docker execution evidence; test counts are shown only when supplied by the backend.")

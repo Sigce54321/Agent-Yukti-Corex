@@ -1,35 +1,18 @@
 
-import os
-import requests
 import streamlit as st
+from ui import backend
+from ui.visuals import row, patch_counts
 
 
-API_BASE_URL = os.getenv(
-    "YUKTICOREX_API_URL",
-    "http://127.0.0.1:8000"
-).rstrip("/")
+def _decision_summary(results):
+    challenger = results.get("challenger_review") or {}
+    regression = (results.get("verification") or {}).get("regression") or {}
+    counts = patch_counts(results.get("diff"))
+    changes = f"+{counts[0]} / -{counts[1]}" if counts is not None else "Unavailable"
+    st.markdown('<div class="decision-summary">' + row("Patch status", results.get("status", "No patch").replace("_", " ").title()) + row("Net change", changes) + row("Test result", regression.get("test_status", "Not run")) + row("Challenger", challenger.get("verdict", "Pending")) + '</div>', unsafe_allow_html=True)
 
 
-def _get_error_message(response):
-    """Extract a readable backend error message."""
-
-    try:
-        data = response.json()
-        error = data.get("error")
-
-        if isinstance(error, dict):
-            return error.get("message", response.text)
-
-        if error:
-            return str(error)
-
-        return data.get("message", response.text)
-
-    except (ValueError, AttributeError):
-        return response.text or "Backend request failed."
-
-
-def show_approval(task_id: str | None = None) -> dict | None:
+def show_approval(task_id: str | None = None, *, compact: bool = False) -> dict | None:
     """
     Display proposed fix and handle user approval or rejection.
 
@@ -41,26 +24,28 @@ def show_approval(task_id: str | None = None) -> dict | None:
         None: If task or results are unavailable.
     """
 
-    st.subheader("Fix Approval")
+    st.subheader("Approval Decision" if compact else "Fix Approval")
 
     if not task_id:
         task_id = st.session_state.get("task_id")
 
     if not task_id:
-        st.info("Please start a debugging task first.")
+        if compact:
+            _decision_summary({})
+        st.info("Submit an issue to begin. Approval becomes available after workflow verification.")
         return None
 
     # Display the result of the previous approval/rejection action.
-    action_key = f"approval_response_{task_id}"
-    previous_action = st.session_state.pop(action_key, None)
+    previous_action = backend.decision_status(st.session_state, task_id)
 
     if isinstance(previous_action, dict):
-        st.success(
-            previous_action.get(
-                "message",
-                "Your decision was submitted."
-            )
-        )
+        if previous_action.get("error") or previous_action.get("status") == "failed":
+            st.error(backend.error_message(previous_action))
+        elif previous_action.get("status") == "running":
+            st.info(previous_action["message"])
+            st.button("Refresh decision", key=f"refresh_decision_{task_id}")
+        else:
+            st.success(previous_action.get("message", "Your decision was submitted."))
 
         previous_pr_url = previous_action.get("pull_request_url")
 
@@ -71,36 +56,34 @@ def show_approval(task_id: str | None = None) -> dict | None:
 
     # Fetch latest debugging results.
     try:
-        response = requests.get(
-            f"{API_BASE_URL}/api/results/{task_id}",
-            timeout=30
-        )
-
-        if response.status_code != 200:
-            st.error(_get_error_message(response))
-            return None
-
-        results = response.json()
-
-    except requests.RequestException as exc:
-        st.error(f"Backend connection failed: {exc}")
-        return None
-
-    except ValueError:
-        st.error("Backend returned an invalid JSON response.")
+        results = backend.get_task_results(task_id)
+    except backend.BackendError as exc:
+        st.error(str(exc))
         return None
 
     if not isinstance(results, dict):
         st.error("Invalid results response from backend.")
         return None
 
+    if results.get("error"):
+        st.error(backend.error_message(results))
+        return results
+    if previous_action is not None:
+        # A stale backend read must never re-enable a decision already sent.
+        results = {**results, **previous_action}
+    st.session_state["task_status"] = results.get("status", "pending")
+    if results.get("message"):
+        st.session_state["task_message"] = results["message"]
+
     # Task details
     status = results.get("status", "pending")
 
-    st.write(f"**Task ID:** `{task_id}`")
-    st.write(f"**Current Status:** `{status}`")
-
-    st.divider()
+    if compact:
+        _decision_summary(results)
+    else:
+        st.write(f"**Task ID:** `{task_id}`")
+        st.write(f"**Current Status:** `{status}`")
+        st.divider()
 
     # Only awaiting_approval tasks can be approved or rejected.
     if status != "awaiting_approval":
@@ -126,131 +109,140 @@ def show_approval(task_id: str | None = None) -> dict | None:
 
         return results
 
-    # Bug information
-    st.markdown("### Proposed Fix")
-
-    st.write(
-        "**Programming Language:**",
-        results.get("language", "Not available")
-    )
-
-    st.write(
-        "**Affected File:**",
-        results.get("bug_file", "Not available")
-    )
-
-    st.write(
-        "**Bug Location:**",
-        results.get("bug_location", "Not available")
-    )
-
-    st.write(
-        "**Explanation:**",
-        results.get("bug_explanation", "Not available")
-    )
-
-    # Modified code
-    st.markdown("### Modified Code")
-
-    modified_code = results.get("modified_code", "")
-
-    if modified_code:
-        st.code(
-            modified_code,
-            language=results.get("language") or "text"
-        )
-    else:
-        st.caption("Modified code is not available.")
-
-    # Code difference
-    st.markdown("### Code Difference")
-
-    diff = results.get("diff")
-
-    if diff:
-        st.code(diff, language="diff")
-    else:
-        st.caption("Code difference is not available.")
-
-    # Challenger review
-    st.markdown("### Fix Challenger Review")
-
-    challenger = results.get("challenger_review", {})
-
-    if isinstance(challenger, dict) and challenger:
+    if not compact:
+        # Bug information
+        st.markdown("### Proposed Fix")
 
         st.write(
-            "**Challenger Approved:**",
-            challenger.get("approved")
+            "**Programming Language:**",
+            results.get("language", "Not available")
         )
 
         st.write(
-            "**Risk Level:**",
-            challenger.get("risk_level", "Not available")
+            "**Affected File:**",
+            results.get("bug_file", "Not available")
         )
 
         st.write(
-            "**Summary:**",
-            challenger.get("summary", "Not available")
+            "**Bug Location:**",
+            results.get("bug_location", "Not available")
         )
 
-        findings = challenger.get("findings", [])
+        st.write(
+            "**Explanation:**",
+            results.get("bug_explanation", "Not available")
+        )
 
-        if findings:
-            st.write("**Findings:**")
-            for finding in findings:
-                st.write(f"- {finding}")
+        # Modified code
+        st.markdown("### Modified Code")
 
-    else:
-        st.caption("Challenger review is not available.")
+        modified_code = results.get("modified_code", "")
 
-    # Verification
-    st.markdown("### Verification Results")
+        if modified_code:
+            st.code(
+                modified_code,
+                language=results.get("language") or "text"
+            )
+        else:
+            st.caption("Modified code is not available.")
 
-    verification = results.get("verification", {})
+        # Code difference
+        st.markdown("### Code Difference")
 
-    if isinstance(verification, dict):
+        diff = results.get("diff")
 
-        for key, title in [
-            ("baseline", "Baseline Testing"),
-            ("regression", "Regression Testing")
-        ]:
-            test_result = verification.get(key, {})
+        if diff:
+            st.code(diff, language="diff")
+        else:
+            st.caption("Code difference is not available.")
 
-            with st.expander(title):
-                if isinstance(test_result, dict):
+        # Challenger review
+        st.markdown("### Fix Challenger Review")
 
-                    test_status = test_result.get(
-                        "test_status", "not_run"
-                    )
+        challenger = results.get("challenger_review", {})
 
-                    if test_status == "passed":
-                        st.success("Tests passed")
+        if isinstance(challenger, dict) and challenger:
 
-                    elif test_status == "failed":
-                        st.error("Tests failed")
+            st.write(
+                "**Verdict:**",
+                challenger.get("verdict") or "Not available"
+            )
 
-                    elif test_status == "error":
-                        st.error("Test execution error")
+            st.write(
+                "**Explanation:**",
+                challenger.get("explanation") or "Not available"
+            )
 
+            for field, title in (
+                ("findings", "Findings"),
+                ("potential_regressions", "Potential Regressions"),
+                ("required_corrections", "Required Corrections"),
+            ):
+                entries = challenger.get(field) or []
+                if isinstance(entries, str):
+                    entries = [entries]
+                st.write(f"**{title}:**")
+                if isinstance(entries, (list, tuple)) and entries:
+                    for entry in entries:
+                        st.write(f"- {entry}")
+                else:
+                    st.caption(f"No {title.lower()} reported.")
+
+        else:
+            st.caption("Challenger review is not available.")
+
+        # Verification
+        st.markdown("### Verification Results")
+
+        verification = results.get("verification", {})
+
+        if isinstance(verification, dict):
+
+            for key, title in [
+                ("baseline", "Baseline Testing"),
+                ("regression", "Regression Testing")
+            ]:
+                test_result = verification.get(key, {})
+
+                with st.expander(title):
+                    if isinstance(test_result, dict):
+
+                        test_status = test_result.get(
+                            "test_status", "not_run"
+                        )
+
+                        if test_status == "passed":
+                            st.success("Tests passed")
+
+                        elif test_status == "failed":
+                            st.error("Tests failed")
+
+                        elif test_status == "error":
+                            st.error("Test execution error")
+
+                        else:
+                            st.info("Tests not run")
+
+                        st.write("Passed:", test_result.get("passed"))
+                        st.write("Exit Code:", test_result.get("exit_code"))
+
+                        if test_result.get("logs"):
+                            st.code(test_result["logs"])
                     else:
-                        st.info("Tests not run")
+                        st.caption("Test result is not available.")
 
-                    st.write("Passed:", test_result.get("passed"))
-                    st.write("Exit Code:", test_result.get("exit_code"))
-
-                    if test_result.get("logs"):
-                        st.code(test_result["logs"])
-
-    st.divider()
+        st.divider()
 
     # Approval options
     st.markdown("### Your Decision")
 
     create_pull_request = st.checkbox(
         "Create GitHub Pull Request after approval",
-        value=True
+        value=False,
+        key=f"create_pr_{task_id}"
     )
+
+    st.caption("Approve only after reviewing the patch, Challenger review and Docker evidence. PR creation requires selecting the option above.")
 
     approve_clicked = st.button(
         "Approve Fix",
@@ -262,34 +254,16 @@ def show_approval(task_id: str | None = None) -> dict | None:
     if approve_clicked:
 
         try:
-            approval_response = requests.post(
-                f"{API_BASE_URL}/api/approve",
-                json={
-                    "task_id": task_id,
-                    "create_pull_request": create_pull_request
-                },
-                timeout=60
+            action_data = backend.submit_decision(
+                st.session_state, task_id, "approve",
+                create_pull_request=create_pull_request,
             )
-
-            if approval_response.status_code in (200, 202):
-
-                try:
-                    action_data = approval_response.json()
-                except ValueError:
-                    st.error("Invalid approval response from backend.")
-                    return results
-
-                st.session_state[action_key] = action_data
-                st.rerun()
-
-            else:
-                st.error(
-                    "Approval failed: "
-                    + _get_error_message(approval_response)
-                )
-
-        except requests.RequestException as exc:
-            st.error(f"Approval request failed: {exc}")
+        except backend.BackendError as exc:
+            st.error(str(exc))
+            return results
+        st.session_state["task_status"] = action_data.get("status", "running")
+        st.rerun()
+        return action_data
 
     # Rejection form
     with st.form(key=f"reject_form_{task_id}"):
@@ -308,33 +282,14 @@ def show_approval(task_id: str | None = None) -> dict | None:
         if reject_clicked:
 
             try:
-                reject_response = requests.post(
-                    f"{API_BASE_URL}/api/reject",
-                    json={
-                        "task_id": task_id,
-                        "reason": reason.strip() or None
-                    },
-                    timeout=30
+                action_data = backend.submit_decision(
+                    st.session_state, task_id, "reject", reason=reason.strip() or None,
                 )
-
-                if reject_response.status_code in (200, 202):
-
-                    try:
-                        action_data = reject_response.json()
-                    except ValueError:
-                        st.error("Invalid rejection response from backend.")
-                        return results
-
-                    st.session_state[action_key] = action_data
-                    st.rerun()
-
-                else:
-                    st.error(
-                        "Rejection failed: "
-                        + _get_error_message(reject_response)
-                    )
-
-            except requests.RequestException as exc:
-                st.error(f"Rejection request failed: {exc}")
+            except backend.BackendError as exc:
+                st.error(str(exc))
+                return results
+            st.session_state["task_status"] = action_data.get("status", "running")
+            st.rerun()
+            return action_data
 
     return results

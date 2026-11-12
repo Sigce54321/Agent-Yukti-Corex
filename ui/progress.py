@@ -1,17 +1,12 @@
 
-import os
-import requests
 import streamlit as st
+from ui import backend
 
 
 # --------------------------------------------------
 # BACKEND CONFIGURATION
 # --------------------------------------------------
 
-API_BASE_URL = os.getenv(
-    "YUKTICOREX_API_URL",
-    "http://127.0.0.1:8000"
-).rstrip("/")
 
 
 # --------------------------------------------------
@@ -50,29 +45,6 @@ VALID_STAGES = [
 # ERROR HANDLING
 # --------------------------------------------------
 
-def _get_error_message(response):
-    """Extract a readable error message from the backend."""
-
-    try:
-        data = response.json()
-        error = data.get("error")
-
-        if isinstance(error, dict):
-            return error.get(
-                "message",
-                "Unable to retrieve debugging progress."
-            )
-
-        if error:
-            return str(error)
-
-        return data.get(
-            "message",
-            response.text or "Backend request failed."
-        )
-
-    except (ValueError, AttributeError):
-        return response.text or "Backend request failed."
 
 
 # --------------------------------------------------
@@ -147,8 +119,7 @@ def show_progress(task_id: str | None = None) -> dict | None:
         task_id: Unique debugging task ID.
                  If omitted, reads from Streamlit session state.
 
-    Backend endpoint:
-        GET /api/progress/{task_id}
+    Uses the local get_task_progress function on every page refresh.
 
     Expected response:
         {
@@ -203,29 +174,7 @@ def show_progress(task_id: str | None = None) -> dict | None:
 
     try:
 
-        response = requests.get(
-            f"{API_BASE_URL}/api/progress/{task_id}",
-            timeout=30
-        )
-
-        try:
-            data = response.json()
-
-        except ValueError:
-            st.error(
-                "Backend returned an invalid JSON response."
-            )
-            return None
-
-        # --------------------------------------------------
-        # HANDLE API ERRORS
-        # --------------------------------------------------
-
-        if response.status_code != 200:
-
-            st.error(_get_error_message(response))
-
-            return data if isinstance(data, dict) else None
+        data = backend.get_task_progress(task_id)
 
         if not isinstance(data, dict):
             st.error(
@@ -274,6 +223,8 @@ def show_progress(task_id: str | None = None) -> dict | None:
 
         if stage:
             st.session_state["task_stage"] = stage
+        if message:
+            st.session_state["task_message"] = message
 
         # --------------------------------------------------
         # DISPLAY TASK INFORMATION
@@ -361,28 +312,51 @@ def show_progress(task_id: str | None = None) -> dict | None:
     # CONNECTION ERROR HANDLING
     # --------------------------------------------------
 
-    except requests.Timeout:
-
-        st.error(
-            "Backend request timed out. "
-            "Please check the backend service."
-        )
-
+    except backend.BackendError as exc:
+        st.error(str(exc))
         return None
 
-    except requests.ConnectionError:
 
-        st.error(
-            "Cannot connect to the backend. "
-            f"Please check {API_BASE_URL}"
-        )
+def render_timeline(stage=None, status=None):
+    """Stage position only; the timeline never invents outcomes or timestamps."""
+    from ui.visuals import title, text, badge
+    groups = [
+        ("Issue intake", ["queued", "reading_issue", "cloning_repository", "detecting_language"]),
+        ("Baseline tests", ["baseline_testing"]),
+        ("Bug location", ["analyzing_issue", "locating_bug"]),
+        ("Patch & review", ["generating_fix", "challenging_fix", "applying_patch"]),
+        ("Regression tests", ["regression_testing", "preparing_report"]),
+        ("Human approval", ["finished", "creating_pull_request"]),
+    ]
+    current = next((i for i, (_, stages) in enumerate(groups) if stage in stages), None)
+    label = stage.replace("_", " ").title() if isinstance(stage, str) else "Not started"
+    html = '<div class="timeline-heading">' + title("Repair Progress Timeline", "branch") + badge(label) + '</div><div class="workflow-track">'
+    for i, (name, _) in enumerate(groups):
+        state, hint = "pending", "Pending"
+        if current is not None:
+            if i < current:
+                state, hint = "earlier", "Earlier stage"
+            elif i == current:
+                state = "failed" if status == "failed" else "current"
+                hint = str(status or "Current").replace("_", " ").title()
+        html += f'<div class="workflow-step {state}"><div class="step-dot">{i+1}</div><b>{name}</b><small>{text(hint)}</small></div>'
+    st.markdown(html + '</div>', unsafe_allow_html=True)
+    st.caption("Workflow position only. Test outcomes are reported separately; no timing or completion metrics are inferred.")
 
-        return None
 
-    except requests.RequestException as exc:
-
-        st.error(
-            f"Could not retrieve debugging progress: {exc}"
-        )
-
-        return None
+def render_agents(stage=None, status=None):
+    """Display actual agent names and activity derived from the workflow stage."""
+    from ui.visuals import title, icon
+    st.markdown(title("Agent Status", "bug"), unsafe_allow_html=True)
+    agents = [("Issue Analyzer", "analyzing_issue", "flask"), ("Bug Locator", "locating_bug", "bug"), ("Fix Generator", "generating_fix", "code"), ("Fix Challenger", "challenging_fix", "shield")]
+    html = '<div class="agent-grid">'
+    for name, agent_stage, symbol in agents:
+        activity, css = "Pending", ""
+        if stage == agent_stage:
+            activity = "Failed" if status == "failed" else "Active" if status == "running" else "Inactive"
+            css = "active" if activity == "Active" else ""
+        elif stage in VALID_STAGES and VALID_STAGES.index(stage) > VALID_STAGES.index(agent_stage):
+            activity = "Earlier stage"
+        html += f'<div class="agent-card {css}"><div class="agent-icon">{icon(symbol, 24)}</div><div><b>{name}</b><small><span class="activity-dot"></span>{activity}</small></div></div>'
+    st.markdown(html + '</div>', unsafe_allow_html=True)
+    st.caption("Stage-derived activity · individual agent telemetry unavailable")
