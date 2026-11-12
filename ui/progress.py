@@ -1,12 +1,7 @@
 
 import streamlit as st
-from ui import backend
 
-
-# --------------------------------------------------
-# BACKEND CONFIGURATION
-# --------------------------------------------------
-
+from core.workflow import get_task_progress
 
 
 # --------------------------------------------------
@@ -42,17 +37,10 @@ VALID_STAGES = [
 
 
 # --------------------------------------------------
-# ERROR HANDLING
-# --------------------------------------------------
-
-
-
-# --------------------------------------------------
 # STATUS DISPLAY
 # --------------------------------------------------
 
 def _display_status(status: str):
-    """Display the official debugging task status."""
 
     if status == "pending":
         st.info("Task is pending and waiting to start.")
@@ -84,17 +72,13 @@ def _display_status(status: str):
 # --------------------------------------------------
 
 def _display_progress(progress_percent):
-    """Display backend-reported progress percentage."""
 
     if (
         isinstance(progress_percent, bool)
         or not isinstance(progress_percent, int)
         or not 0 <= progress_percent <= 100
     ):
-        st.warning(
-            "The backend did not provide a valid "
-            "progress percentage (integer between 0 and 100)."
-        )
+        st.warning("Invalid progress percentage received.")
         return
 
     st.markdown("### Overall Progress")
@@ -112,29 +96,6 @@ def _display_progress(progress_percent):
 # --------------------------------------------------
 
 def show_progress(task_id: str | None = None) -> dict | None:
-    """
-    Fetch and display debugging task progress.
-
-    Args:
-        task_id: Unique debugging task ID.
-                 If omitted, reads from Streamlit session state.
-
-    Uses the local get_task_progress function on every page refresh.
-
-    Expected response:
-        {
-            "task_id": "task-123",
-            "status": "running",
-            "stage": "analyzing_issue",
-            "progress_percent": 45,
-            "message": "AI agents are analyzing the issue.",
-            "updated_at": "2026-11-11T10:00:00Z"
-        }
-
-    Returns:
-        dict: Backend progress response.
-        None: If progress is unavailable.
-    """
 
     st.subheader("Debugging Progress")
 
@@ -159,28 +120,32 @@ def show_progress(task_id: str | None = None) -> dict | None:
     # --------------------------------------------------
 
     st.caption(
-        "Progress is retrieved from the backend whenever "
-        "this page is loaded or refreshed."
+        "Progress is retrieved directly from the Python workflow."
     )
 
-    st.button(
+    refresh_clicked = st.button(
         "Refresh Progress",
         key=f"refresh_progress_{task_id}"
     )
 
+    if refresh_clicked:
+        st.rerun()
+
     # --------------------------------------------------
-    # BACKEND API REQUEST
+    # GET PROGRESS FROM PYTHON WORKFLOW
     # --------------------------------------------------
 
     try:
 
-        data = backend.get_task_progress(task_id)
+        data = get_task_progress(task_id)
 
         if not isinstance(data, dict):
-            st.error(
-                "Invalid progress response received from backend."
-            )
+            st.error("Invalid response from Python workflow.")
             return None
+
+        # --------------------------------------------------
+        # HANDLE WORKFLOW ERRORS
+        # --------------------------------------------------
 
         error = data.get("error")
 
@@ -199,7 +164,7 @@ def show_progress(task_id: str | None = None) -> dict | None:
             return data
 
         # --------------------------------------------------
-        # READ BACKEND RESPONSE
+        # READ TASK INFORMATION
         # --------------------------------------------------
 
         returned_task_id = data.get("task_id", task_id)
@@ -223,11 +188,12 @@ def show_progress(task_id: str | None = None) -> dict | None:
 
         if stage:
             st.session_state["task_stage"] = stage
-        if message:
+
+        if message is not None:
             st.session_state["task_message"] = message
 
         # --------------------------------------------------
-        # DISPLAY TASK INFORMATION
+        # TASK INFORMATION
         # --------------------------------------------------
 
         st.divider()
@@ -237,27 +203,34 @@ def show_progress(task_id: str | None = None) -> dict | None:
         col1, col2 = st.columns(2)
 
         with col1:
+
             st.write("**Task ID**")
             st.code(returned_task_id)
 
         with col2:
+
             st.write("**Task Status**")
 
             if isinstance(status, str):
-                st.write(f"`{status}`")
+                st.code(status)
             else:
                 st.caption("Status not available.")
 
         # --------------------------------------------------
-        # DISPLAY STATUS
+        # CURRENT STATUS
         # --------------------------------------------------
 
         if isinstance(status, str):
+
             st.markdown("### Current Status")
+
             _display_status(status)
 
+            if status not in VALID_STATUSES:
+                st.warning("Unknown workflow status received.")
+
         # --------------------------------------------------
-        # DISPLAY WORKFLOW STAGE
+        # CURRENT WORKFLOW STAGE
         # --------------------------------------------------
 
         st.markdown("### Current Workflow Stage")
@@ -269,49 +242,58 @@ def show_progress(task_id: str | None = None) -> dict | None:
             if stage not in VALID_STAGES:
                 st.warning(
                     "The returned stage is not part of "
-                    "the agreed workflow stage values."
+                    "the configured workflow stages."
                 )
 
         else:
             st.caption("Workflow stage is not available.")
 
         # --------------------------------------------------
-        # DISPLAY PROGRESS PERCENTAGE
+        # PROGRESS PERCENTAGE
         # --------------------------------------------------
 
         if progress_percent is not None:
+
             _display_progress(progress_percent)
+
         else:
-            st.caption(
-                "Progress percentage is not yet available."
-            )
+
+            st.caption("Progress percentage is not available.")
 
         # --------------------------------------------------
-        # DISPLAY BACKEND MESSAGE
+        # WORKFLOW MESSAGE
         # --------------------------------------------------
 
         if isinstance(message, str) and message:
 
-            st.markdown("### Backend Message")
+            st.markdown("### Workflow Message")
 
             st.info(message)
 
         # --------------------------------------------------
-        # DISPLAY LAST UPDATED TIME
+        # ERROR DETAILS
+        # --------------------------------------------------
+
+        if isinstance(data.get("error"), dict):
+
+            with st.expander("Error Details"):
+
+                st.json(data["error"])
+
+        # --------------------------------------------------
+        # LAST UPDATED
         # --------------------------------------------------
 
         if isinstance(updated_at, str) and updated_at:
 
-            st.caption(
-                f"Last Updated: {updated_at}"
-            )
+            st.caption(f"Last Updated: {updated_at}")
 
         return data
 
-    # --------------------------------------------------
-    # CONNECTION ERROR HANDLING
-    # --------------------------------------------------
+    except Exception as exc:
 
-    except backend.BackendError as exc:
-        st.error(str(exc))
+        st.error(
+            f"Could not retrieve debugging progress: {exc}"
+        )
+
         return None

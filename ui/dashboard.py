@@ -1,6 +1,5 @@
 
 import streamlit as st
-from ui import backend
 
 from ui.issue_form import show_issue_form
 from ui.progress import show_progress
@@ -8,18 +7,11 @@ from ui.results import render_results
 from ui.approval import show_approval
 
 
-# --------------------------------------------------
-# BACKEND CONFIGURATION
-# --------------------------------------------------
-
-
-
-# --------------------------------------------------
+# ----------------------------------------------------
 # SESSION STATE
-# --------------------------------------------------
+# ----------------------------------------------------
 
 def initialize_session():
-
     defaults = {
         "task_id": None,
         "task_status": "pending",
@@ -34,22 +26,15 @@ def initialize_session():
             st.session_state[key] = value
 
 
-# --------------------------------------------------
-# BACKEND HEALTH CHECK
-# --------------------------------------------------
-
-def check_backend():
-    return backend.local_status()
-
-
-# --------------------------------------------------
+# ----------------------------------------------------
 # DASHBOARD METRICS
-# --------------------------------------------------
+# ----------------------------------------------------
 
 def display_metrics():
 
     task_id = st.session_state.get("task_id")
     status = st.session_state.get("task_status", "pending")
+    stage = st.session_state.get("task_stage", "queued")
 
     col1, col2, col3 = st.columns(3)
 
@@ -69,29 +54,40 @@ def display_metrics():
     with col3:
         st.metric(
             "Current Stage",
-            st.session_state.get(
-                "task_stage", "queued"
-            ).replace("_", " ").title()
+            stage.replace("_", " ").title()
             if task_id else "Not Started"
         )
 
 
-# --------------------------------------------------
+# ----------------------------------------------------
 # WORKFLOW OVERVIEW
-# --------------------------------------------------
+# ----------------------------------------------------
 
 def display_workflow():
 
     st.subheader("Autonomous Debugging Workflow")
 
     stages = [
-        ("01", "Issue Submission", "Submit a GitHub repository and issue number."),
-        ("02", "Issue Analysis", "Analyze the reported problem."),
-        ("03", "Bug Detection", "Locate the affected file and function."),
-        ("04", "Fix Generation", "Generate a proposed code correction."),
-        ("05", "Fix Verification", "Run baseline and regression tests."),
-        ("06", "Approval", "Review and approve or reject the proposed fix."),
-        ("07", "Pull Request", "Create a GitHub Pull Request after approval.")
+        ("01", "Issue Submission",
+         "Submit a GitHub repository and issue number."),
+
+        ("02", "Issue Analysis",
+         "Analyze the reported problem."),
+
+        ("03", "Bug Detection",
+         "Locate the affected file and function."),
+
+        ("04", "Fix Generation",
+         "Generate a proposed code correction."),
+
+        ("05", "Fix Verification",
+         "Run baseline and regression tests."),
+
+        ("06", "Approval",
+         "Review and approve or reject the proposed fix."),
+
+        ("07", "Pull Request",
+         "Create a GitHub Pull Request after approval.")
     ]
 
     for number, title, description in stages:
@@ -108,9 +104,9 @@ def display_workflow():
                 st.caption(description)
 
 
-# --------------------------------------------------
+# ----------------------------------------------------
 # CURRENT TASK DETAILS
-# --------------------------------------------------
+# ----------------------------------------------------
 
 def display_current_task():
 
@@ -119,7 +115,6 @@ def display_current_task():
     st.subheader("Current Debugging Task")
 
     if not task_id:
-
         st.info(
             "No debugging task is currently registered. "
             "Select Report Issue to start."
@@ -134,7 +129,8 @@ def display_current_task():
         st.write("**Repository**")
         st.write(
             st.session_state.get(
-                "repo_url", "Not available"
+                "repo_url",
+                "Not available"
             )
         )
 
@@ -142,27 +138,77 @@ def display_current_task():
         st.write("**GitHub Issue Number**")
         st.write(
             st.session_state.get(
-                "issue_number", "Not available"
+                "issue_number",
+                "Not available"
             )
         )
 
     st.write(
         "**Latest Backend Message:**",
         st.session_state.get(
-            "task_message", "No message available."
+            "task_message",
+            "No message available."
         )
     )
 
 
-# --------------------------------------------------
+# ----------------------------------------------------
+# SYSTEM STATUS
+# ----------------------------------------------------
+
+def display_system_status():
+
+    st.sidebar.divider()
+    st.sidebar.subheader("System Status")
+
+    st.sidebar.success("Python Backend Mode")
+
+    st.sidebar.caption(
+        "Direct Python function execution"
+    )
+
+    st.sidebar.info(
+        "No separate API server required."
+    )
+
+
+# ----------------------------------------------------
+# ACTIVE TASK
+# ----------------------------------------------------
+
+def display_active_task():
+
+    st.sidebar.divider()
+    st.sidebar.subheader("Active Task")
+
+    task_id = st.session_state.get("task_id")
+
+    if task_id:
+
+        st.sidebar.code(task_id)
+
+        st.sidebar.write(
+            "Status:",
+            st.session_state.get(
+                "task_status",
+                "pending"
+            )
+        )
+
+    else:
+
+        st.sidebar.caption("No active task")
+
+
+# ----------------------------------------------------
 # MAIN DASHBOARD
-# --------------------------------------------------
+# ----------------------------------------------------
 
 def render_dashboard():
 
     initialize_session()
 
-    # Header
+    # HEADER
     st.title("🛠️ YuktiC-oreX")
 
     st.markdown(
@@ -170,13 +216,13 @@ def render_dashboard():
     )
 
     st.caption(
-        "Analyze GitHub issues, identify bugs, "
-        "generate fixes, verify changes and request approval."
+        "Analyze GitHub issues, identify bugs, generate fixes, "
+        "verify changes and request approval."
     )
 
     st.divider()
 
-    # Sidebar navigation
+    # NAVIGATION
     st.sidebar.subheader("Navigation")
 
     page = st.sidebar.radio(
@@ -191,52 +237,15 @@ def render_dashboard():
         key="dashboard_navigation"
     )
 
-    # Backend connection
-    st.sidebar.divider()
-    st.sidebar.subheader("System Status")
-
-    health = check_backend()
-
-    if health:
-
-        st.sidebar.success("Local Backend Available")
-
-        docker_status = health.get("docker_available")
-
-        if docker_status is True:
-            st.sidebar.success("Docker Available")
-        elif docker_status is False:
-            st.sidebar.warning("Docker Unavailable")
-        else:
-            st.sidebar.caption("Docker availability is checked when a task runs")
-
-    else:
-        st.sidebar.error("Local Backend Unavailable")
-        st.sidebar.caption("Check the application logs for workflow import errors")
-
-    # Task information in sidebar
-    st.sidebar.divider()
-    st.sidebar.subheader("Active Task")
-
-    task_id = st.session_state.get("task_id")
-
-    if task_id:
-
-        st.sidebar.code(task_id)
-
-        st.sidebar.write(
-            "Status:",
-            st.session_state.get("task_status", "pending")
-        )
-
-    else:
-        st.sidebar.caption("No active task")
+    # SIDEBAR STATUS
+    display_system_status()
+    display_active_task()
 
     st.divider()
 
-    # --------------------------------------------------
-    # DASHBOARD HOME
-    # --------------------------------------------------
+    # ------------------------------------------------
+    # DASHBOARD PAGE
+    # ------------------------------------------------
 
     if page == "Dashboard":
 
@@ -252,9 +261,9 @@ def render_dashboard():
 
         display_workflow()
 
-    # --------------------------------------------------
-    # ISSUE SUBMISSION
-    # --------------------------------------------------
+    # ------------------------------------------------
+    # REPORT ISSUE PAGE
+    # ------------------------------------------------
 
     elif page == "Report Issue":
 
@@ -262,9 +271,9 @@ def render_dashboard():
 
         show_issue_form()
 
-    # --------------------------------------------------
-    # PROGRESS
-    # --------------------------------------------------
+    # ------------------------------------------------
+    # PROGRESS PAGE
+    # ------------------------------------------------
 
     elif page == "Progress":
 
@@ -300,9 +309,9 @@ def render_dashboard():
                 "checking debugging progress."
             )
 
-    # --------------------------------------------------
-    # RESULTS
-    # --------------------------------------------------
+    # ------------------------------------------------
+    # RESULTS PAGE
+    # ------------------------------------------------
 
     elif page == "Results":
 
@@ -328,9 +337,9 @@ def render_dashboard():
                 "Submit an issue first."
             )
 
-    # --------------------------------------------------
-    # APPROVAL
-    # --------------------------------------------------
+    # ------------------------------------------------
+    # APPROVAL PAGE
+    # ------------------------------------------------
 
     elif page == "Approval":
 
@@ -355,9 +364,9 @@ def render_dashboard():
                 "No debugging task available for approval."
             )
 
-    # --------------------------------------------------
+    # ------------------------------------------------
     # FOOTER
-    # --------------------------------------------------
+    # ------------------------------------------------
 
     st.divider()
 
@@ -366,5 +375,5 @@ def render_dashboard():
     )
 
     st.caption(
-        "Streamlit Frontend | Direct Workflow Integration"
+        "Streamlit UI | Direct Python Backend Integration"
     )

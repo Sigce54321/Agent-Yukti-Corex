@@ -1,60 +1,77 @@
 
+from urllib.parse import urlparse 
 import streamlit as st
-from urllib.parse import urlparse
-from ui import backend
 
-
-# --------------------------------------------------
-# BACKEND CONFIGURATION
-# --------------------------------------------------
-
-
-
-# --------------------------------------------------
-# ERROR HANDLING
-# --------------------------------------------------
-
+from github.issue_reader import read_github_issue
+from core.workflow import start_debugging
 
 
 # --------------------------------------------------
 # REPOSITORY URL VALIDATION
 # --------------------------------------------------
 
-def _validate_repository_url(repo_url: str) -> bool:
-    """
-    Validate a GitHub repository URL.
 
-    Expected format:
-        https://github.com/owner/repository
-    """
+from urllib.parse import urlparse
+
+
+def _validate_repository_url(repo_url):
+
+    repo_url = repo_url.strip()
 
     try:
-        parsed = urlparse(repo_url.strip())
+        parsed = urlparse(repo_url)
 
-        if parsed.scheme not in ("https", "http"):
+        if parsed.scheme != "https":
             return False
 
-        if parsed.netloc.lower() not in (
-            "github.com",
-            "www.github.com"
-        ):
+        if parsed.netloc.lower() != "github.com":
             return False
 
-        path_parts = [
+        parts = [
             part for part in parsed.path.strip("/").split("/")
             if part
         ]
 
-        if len(path_parts) != 2:
+        if len(parts) != 2:
             return False
 
-        if not all(path_parts):
+        if not parts[0] or not parts[1]:
             return False
 
         return True
 
-    except (ValueError, AttributeError):
+    except Exception:
         return False
+
+
+# --------------------------------------------------
+# ERROR DISPLAY
+# --------------------------------------------------
+
+def _show_error(error_data):
+
+    if isinstance(error_data, dict):
+
+        error = error_data.get("error", {})
+
+        if isinstance(error, dict):
+
+            st.error(
+                error.get(
+                    "message",
+                    "An error occurred."
+                )
+            )
+
+            details = error.get("details")
+
+            if details:
+                with st.expander("Error Details"):
+                    st.write(details)
+
+            return
+
+    st.error(str(error_data))
 
 
 # --------------------------------------------------
@@ -62,25 +79,6 @@ def _validate_repository_url(repo_url: str) -> bool:
 # --------------------------------------------------
 
 def show_issue_form():
-    """
-    Display the GitHub issue submission form.
-
-    Calls the local workflow's asynchronous start_debugging function.
-
-    Request:
-        {
-            "repo_url": str,
-            "issue_number": int
-        }
-
-    Response:
-        {
-            "task_id": str,
-            "status": "pending",
-            "stage": "queued",
-            "message": str
-        }
-    """
 
     st.header("GitHub Issue Submission")
 
@@ -99,14 +97,12 @@ def show_issue_form():
 
         repo_url = st.text_input(
             "GitHub Repository URL",
-            placeholder="https://github.com/owner/repository",
-            help="Enter the main GitHub repository URL."
+            placeholder="https://github.com/owner/repository"
         )
 
         issue_number_input = st.text_input(
             "GitHub Issue Number",
-            placeholder="Example: 5",
-            help="Enter the numerical GitHub issue number."
+            placeholder="Example: 5"
         )
 
         submitted = st.form_submit_button(
@@ -116,7 +112,7 @@ def show_issue_form():
         )
 
     # --------------------------------------------------
-    # FORM SUBMISSION
+    # SUBMISSION PROCESS
     # --------------------------------------------------
 
     if submitted:
@@ -125,190 +121,237 @@ def show_issue_form():
         issue_number_input = issue_number_input.strip()
 
         # Validate repository URL
-        if not repo_url:
-            st.error("Please enter a GitHub repository URL.")
-
-            return
-
         if not _validate_repository_url(repo_url):
+
             st.error(
                 "Invalid GitHub repository URL. "
-                "Use this format: "
-                "https://github.com/owner/repository"
+                "Use https://github.com/owner/repository"
             )
 
             return
 
         # Validate issue number
-        if not issue_number_input:
-            st.error("Please enter a GitHub issue number.")
-
-            return
-
         try:
+
             issue_number = int(issue_number_input)
 
             if issue_number <= 0:
-                st.error("Issue number must be greater than zero.")
+                st.error(
+                    "Issue number must be greater than zero."
+                )
                 return
 
         except ValueError:
-            st.error("Issue number must be a valid integer.")
+
+            st.error(
+                "Please enter a valid numerical issue number."
+            )
+
             return
 
         # --------------------------------------------------
-        # BACKEND API REQUEST
+        # FETCH GITHUB ISSUE
         # --------------------------------------------------
 
-        st.info("Submitting debugging task to the local workflow...")
+        with st.spinner("Fetching GitHub issue details..."):
 
-        try:
-
-            data = backend.submit_task(st.session_state, repo_url, issue_number)
-            if data.get("error") or data.get("status") == "failed":
-                st.error(backend.error_message(data))
-                return
-
-            # Validate response format
-            if not isinstance(data, dict):
-                st.error("Invalid response received from backend.")
-                return
-
-            task_id = data.get("task_id")
-
-            if not task_id:
-                st.error(
-                    "Backend response does not contain a task_id."
-                )
-                return
-
-            # --------------------------------------------------
-            # SAVE TASK INFORMATION
-            # --------------------------------------------------
-
-            if st.session_state.get("task_id") == task_id:
-                # Reusing a guarded submission must not rewind polled progress
-                # to the original queued response.
-                data = {**data, **{
-                    field: st.session_state.get(session_key, data.get(field))
-                    for field, session_key in (
-                        ("status", "task_status"), ("stage", "task_stage"),
-                        ("message", "task_message"),
-                    )
-                }}
-
-            st.session_state["task_id"] = task_id
-
-            st.session_state["task_status"] = data.get(
-                "status",
-                "pending"
+            issue_data = read_github_issue(
+                repo_url,
+                issue_number
             )
 
-            st.session_state["task_stage"] = data.get(
-                "stage",
-                "queued"
-            )
+        if not isinstance(issue_data, dict):
 
-            st.session_state["task_message"] = data.get(
-                "message",
-                "Debugging task accepted."
-            )
+            st.error("Invalid response from GitHub issue reader.")
+            return
 
-            st.session_state["repo_url"] = repo_url
+        if not issue_data.get("success"):
 
-            st.session_state["issue_number"] = issue_number
-
-            # Save complete backend response
-            st.session_state["debug_task_response"] = data
-
-            # --------------------------------------------------
-            # SUCCESS MESSAGE
-            # --------------------------------------------------
-
-            st.success(
-                data.get(
-                    "message",
-                    "Debugging task accepted successfully."
-                )
-            )
-
-            st.markdown("### Debugging Task Details")
-
-            col1, col2 = st.columns(2)
-
-            with col1:
-                st.write("**Task ID**")
-                st.code(task_id)
-
-                st.write("**Repository**")
-                st.write(repo_url)
-
-            with col2:
-                st.write("**Issue Number**")
-                st.write(issue_number)
-
-                st.write("**Status**")
-                st.write(st.session_state["task_status"])
-
-            st.write(
-                "**Current Stage:**",
-                st.session_state["task_stage"]
-            )
-
-            st.info(
-                "Your debugging task has been registered. "
-                "Open the Progress page to monitor execution."
-            )
+            _show_error(issue_data)
+            return
 
         # --------------------------------------------------
-        # CONNECTION ERROR
+        # DISPLAY ISSUE DETAILS
         # --------------------------------------------------
 
-        except backend.BackendError as exc:
-            st.error(str(exc))
+        st.success("GitHub issue fetched successfully!")
+
+        st.subheader("Issue Details")
+
+        st.markdown(
+            "**Title:** {}".format(
+                issue_data.get("title", "Untitled")
+            )
+        )
+
+        st.write(
+            "**Issue Number:**",
+            issue_data.get("number")
+        )
+
+        st.write(
+            "**Repository:**",
+            repo_url
+        )
+
+        st.write(
+            "**State:**",
+            issue_data.get("state", "Unknown")
+        )
+
+        st.write(
+            "**Reported By:**",
+            issue_data.get("user", "Unknown")
+        )
+
+        st.write("**Description:**")
+
+        issue_body = issue_data.get("body") or "No description provided."
+
+        st.text_area(
+            "Issue Description",
+            value=issue_body,
+            height=150,
+            disabled=True
+        )
+
+        st.markdown(
+            "[Open GitHub Issue]({})".format(
+                issue_data.get("issue_url", "")
+            )
+        )
+
+        st.divider()
+
+        # --------------------------------------------------
+        # START DIRECT PYTHON WORKFLOW
+        # --------------------------------------------------
+
+        with st.spinner(
+            "Starting YuktiC-oreX autonomous debugging workflow..."
+        ):
+
+            result = start_debugging(
+                repo_url,
+                issue_number
+            )
+
+        if not isinstance(result, dict):
+
+            st.error(
+                "Invalid response from debugging workflow."
+            )
+
+            return
+
+        # Check workflow errors
+        if result.get("status") == "failed" or result.get("error"):
+
+            _show_error(result)
+            return
+
+        task_id = result.get("task_id")
+
+        if not task_id:
+
+            st.error(
+                "Debugging workflow did not return a task ID."
+            )
+
+            return
+
+        # --------------------------------------------------
+        # SAVE SESSION STATE
+        # --------------------------------------------------
+
+        st.session_state["task_id"] = task_id
+
+        st.session_state["task_status"] = result.get(
+            "status",
+            "pending"
+        )
+
+        st.session_state["task_stage"] = result.get(
+            "stage",
+            "queued"
+        )
+
+        st.session_state["task_message"] = result.get(
+            "message",
+            "Debugging task accepted."
+        )
+
+        st.session_state["repo_url"] = repo_url
+
+        st.session_state["issue_number"] = issue_number
+
+        st.session_state["debug_task_response"] = result
+
+        st.session_state["github_issue_data"] = issue_data
+
+        # --------------------------------------------------
+        # SUCCESS
+        # --------------------------------------------------
+
+        st.success(
+            "YuktiC-oreX debugging task started successfully!"
+        )
+
+        st.subheader("Debugging Task Details")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+
+            st.write("**Task ID**")
+            st.code(task_id)
+
+            st.write("**Repository**")
+            st.write(repo_url)
+
+        with col2:
+
+            st.write("**Issue Number**")
+            st.write(issue_number)
+
+            st.write("**Status**")
+            st.write(result.get("status", "pending"))
+
+        st.write(
+            "**Current Stage:**",
+            result.get("stage", "queued")
+        )
+
+        st.info(
+            "Your debugging workflow is running in the background. "
+            "Open the Progress page to monitor execution."
+        )
 
     # --------------------------------------------------
-    # EXISTING TASK INFORMATION
+    # EXISTING TASK
     # --------------------------------------------------
 
     current_task_id = st.session_state.get("task_id")
 
-    if current_task_id and not submitted:
+    if current_task_id:
 
         st.divider()
 
         st.subheader("Current Debugging Task")
 
-        st.write(
-            "**Task ID:**",
-            current_task_id
-        )
+        st.code(current_task_id)
 
         st.write(
             "**Status:**",
-            st.session_state.get(
-                "task_status",
-                "pending"
-            )
+            st.session_state.get("task_status", "pending")
         )
 
         st.write(
             "**Stage:**",
-            st.session_state.get(
-                "task_stage",
-                "queued"
-            )
+            st.session_state.get("task_stage", "queued")
         )
 
-    # Explicitly reset only the submission guard; navigation never resets it.
-    if st.session_state.get("debug_submissions"):
-        st.caption("Repeated submissions reuse the accepted task. Reset only when you intend to start another run.")
-        if st.button("Allow another run for this issue", key="reset_debug_submission"):
-            retry_url = repo_url.strip()
-            try:
-                retry_issue = int(issue_number_input.strip())
-            except ValueError:
-                st.warning("Enter the repository and issue number to reset.")
-            else:
-                backend.reset_submission(st.session_state, retry_url, retry_issue)
-                st.info("You can now submit a new run for this issue.")
+        st.write(
+            "**Message:**",
+            st.session_state.get("task_message", "")
+        )
