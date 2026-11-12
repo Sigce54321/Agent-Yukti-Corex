@@ -263,7 +263,7 @@ def _add_table(story, rows, styles):
                 colors.HexColor("#CBD5E1")
             ),
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 8),
+            ("LEFTPADDING", (0, 0), (-1, -1),   8),
             ("RIGHTPADDING", (0, 0), (-1, -1), 8),
             ("TOPPADDING", (0, 0), (-1, -1), 7),
             ("BOTTOMPADDING", (0, 0), (-1, -1), 7)
@@ -299,7 +299,36 @@ def _add_page_number(canvas, document):
 
     canvas.restoreState()
 
+def _add_test_evidence(story, heading, result, styles):
+    """Display actual execution evidence for one test stage."""
 
+    _add_heading(story, heading, styles)
+
+    rows = [
+        ["Test Status", _get_text(result, "test_status")],
+        ["Passed", _get_text(result, "passed")],
+        ["Exit Code", _get_text(result, "exit_code")],
+        [
+            "Execution Command",
+            _get_text(result, "execution_command", "command")
+        ],
+        [
+            "Duration (seconds)",
+            _get_text(result, "duration_seconds")
+        ],
+        ["Timed Out", _get_text(result, "timed_out")]
+    ]
+
+    _add_table(story, rows, styles)
+
+    _add_text(story, "Execution Logs:", styles)
+
+    _add_code(
+        story,
+        result.get("logs", "No execution logs available."),
+        styles
+    )
+    
 # ----------------------------------------------------
 # 6. GENERATE FIX PASSPORT
 # ----------------------------------------------------
@@ -336,20 +365,37 @@ def generate_fix_passport(
         challenger_review = _to_dict(challenger_review)
 
         # ------------------------------------------------
-        # VALIDATE VERIFICATION
+              # VALIDATE VERIFICATION
         # ------------------------------------------------
 
-        verification_passed = (
-            verification.get("passed") is True
-            or verification.get("test_status") == "passed"
+        baseline_result = _to_dict(verification.get("baseline", {}))
+        regression_result = _to_dict(verification.get("regression", {}))
+
+        has_nested_evidence = bool(
+            verification.get("baseline")
+            or verification.get("regression")
         )
+
+        if has_nested_evidence:
+            verification_passed = (
+                verification.get("passed") is True
+                and baseline_result.get("test_status") == "failed"
+                and regression_result.get("test_status") == "passed"
+                and regression_result.get("passed") is True
+            )
+        else:
+            # Backward compatibility with the existing flat format.
+            regression_result = verification
+            verification_passed = (
+                verification.get("passed") is True
+                or verification.get("test_status") == "passed"
+            )
 
         if not verification_passed:
             raise ValueError(
                 "Cannot generate Fix Passport: "
-                "regression verification did not pass."
+                "baseline and regression verification did not pass."
             )
-
         # ------------------------------------------------
         # VALIDATE FIX CHALLENGER
         # ------------------------------------------------
@@ -672,13 +718,13 @@ def generate_fix_passport(
                         styles
                     )
 
-        # ------------------------------------------------
-        # 8. REGRESSION VERIFICATION
+               # ------------------------------------------------
+        # 8. BASELINE AND REGRESSION VERIFICATION
         # ------------------------------------------------
 
         _add_heading(
             story,
-            "8. Regression Verification Results",
+            "8. Verification Summary",
             styles
         )
 
@@ -686,44 +732,28 @@ def generate_fix_passport(
             story,
             [
                 [
-                    "Verification",
-                    "PASSED"
+                    "Overall Verification",
+                    "PASSED" if verification_passed else "FAILED"
                 ],
                 [
-                    "Test Status",
-                    _get_text(
-                        verification,
-                        "test_status",
-                        default="passed"
-                    )
-                ],
-                [
-                    "Exit Code",
-                    _get_text(
-                        verification,
-                        "exit_code",
-                        default="Not available"
-                    )
+                    "Verification Summary",
+                    _get_text(verification, "summary")
                 ]
             ],
             styles
         )
 
-        _add_text(
+        _add_test_evidence(
             story,
-            "Verification Logs:",
+            "8.1 Baseline Test Results",
+            baseline_result,
             styles
         )
 
-        _add_code(
+        _add_test_evidence(
             story,
-            verification.get(
-                "logs",
-                verification.get(
-                    "message",
-                    "No verification logs available."
-                )
-            ),
+            "8.2 Regression Test Results",
+            regression_result,
             styles
         )
 
